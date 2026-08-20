@@ -14,15 +14,17 @@ import (
 
 // dbConf 测试用嵌套配置段。
 type dbConf struct {
-	DSN string `yaml:"dsn"`
+	DSN         string `yaml:"dsn"`
+	MaxOpenConn int    `yaml:"max_open_conn"`
 }
 
-// serverConf 测试用配置结构，覆盖字符串、整型、布尔与嵌套、含下划线键名。
+// serverConf 测试用配置结构，覆盖字符串、整型、布尔、切片与嵌套结构。
 type serverConf struct {
-	Name     string `yaml:"name"`
-	GRPCPort int    `yaml:"grpc_port"`
-	Debug    bool   `yaml:"debug"`
-	DB       dbConf `yaml:"db"`
+	Name     string   `yaml:"name"`
+	GRPCPort int      `yaml:"grpc_port"`
+	Debug    bool     `yaml:"debug"`
+	Tags     []string `yaml:"tags"`
+	DB       dbConf   `yaml:"db"`
 }
 
 // validatingConf 带必填校验的配置，验证 MustLoad 对 Validate 的调用。
@@ -59,51 +61,46 @@ func mustPanic(t *testing.T, fn func()) {
 	fn()
 }
 
-const baseYAML = `
-name: user
-grpc_port: 9090
-debug: false
-db:
-  dsn: postgres://localhost/dev
-`
-
 func TestMustLoad(t *testing.T) {
 	tests := []struct {
 		name string
 		yaml string
-		env  map[string]string
 		want serverConf
 	}{
 		{
-			name: "纯文件解析",
-			yaml: baseYAML,
-			want: serverConf{Name: "user", GRPCPort: 9090, Debug: false, DB: dbConf{DSN: "postgres://localhost/dev"}},
+			name: "各类型与嵌套结构绑定",
+			yaml: `
+name: user
+grpc_port: 9090
+debug: true
+tags:
+  - core
+  - beta
+db:
+  dsn: postgres://localhost/dev
+  max_open_conn: 20
+`,
+			want: serverConf{
+				Name:     "user",
+				GRPCPort: 9090,
+				Debug:    true,
+				Tags:     []string{"core", "beta"},
+				DB:       dbConf{DSN: "postgres://localhost/dev", MaxOpenConn: 20},
+			},
 		},
 		{
-			name: "环境变量覆盖各类型与嵌套",
-			yaml: baseYAML,
-			env: map[string]string{
-				"APP_GRPC_PORT": "8081",              // 含下划线的键：贪心匹配 grpc_port
-				"APP_DEBUG":     "true",              // 布尔
-				"APP_DB_DSN":    "mysql://prod/main", // 嵌套 db.dsn
-			},
-			want: serverConf{Name: "user", GRPCPort: 8081, Debug: true, DB: dbConf{DSN: "mysql://prod/main"}},
+			name: "缺省字段取零值",
+			yaml: "name: user\n",
+			want: serverConf{Name: "user"},
 		},
 		{
-			name: "无关与未匹配的环境变量被忽略",
-			yaml: baseYAML,
-			env: map[string]string{
-				"APP_NOT_EXIST": "1",
-				"OTHERPREFIX":   "2",
-			},
-			want: serverConf{Name: "user", GRPCPort: 9090, DB: dbConf{DSN: "postgres://localhost/dev"}},
+			name: "空文件全部取零值",
+			yaml: "",
+			want: serverConf{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for k, v := range tt.env {
-				t.Setenv(k, v)
-			}
 			var got serverConf
 			conf.MustLoad(writeFile(t, tt.yaml), &got)
 			if diff := cmp.Diff(tt.want, got); diff != "" {
@@ -130,6 +127,13 @@ func TestMustLoadPanic(t *testing.T) {
 			fn: func() {
 				var c serverConf
 				conf.MustLoad(writeFile(t, "name: [\n"), &c)
+			},
+		},
+		{
+			name: "类型不匹配",
+			fn: func() {
+				var c serverConf
+				conf.MustLoad(writeFile(t, "grpc_port: not-a-number\n"), &c)
 			},
 		},
 		{

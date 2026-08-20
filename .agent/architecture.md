@@ -38,7 +38,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── .gitignore                # 忽略 bin/ 与 .claude/（settings.json 除外，报告与备份不入库）
 ├── go.mod / go.sum           # 单一 module，多服务共用
 ├── cmd/{service}/            # main：读配置、构造注入、启动双端口、优雅退出
-├── configs/{service}.yaml    # 每服务一份配置样例，运行时可被环境变量覆盖
+├── configs/{service}.yaml    # 每服务一份配置，经 pkg/conf.MustLoad 绑定到结构体
 ├── migrations/{service}/     # golang-migrate 纯 SQL 迁移文件（工作流见 engineering.md）
 ├── docs/                     # 业务与产品文档：人类主编，AI 仅在用户明示时写入；AI 规范勿入
 ├── internal/

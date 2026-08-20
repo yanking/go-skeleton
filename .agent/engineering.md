@@ -42,8 +42,9 @@
 ## 配置
 
 - 每服务一份 `configs/{service}.yaml`；解析用 `gopkg.in/yaml.v3`，不引重型配置框架。
-- 环境变量覆盖：`APP_` 前缀＋下划线路径映射（如 `APP_SERVER_GRPC_PORT` 覆盖 `server.grpc_port`），由 `pkg/conf` 的 `MustLoad(configFile string, obj any)` 统一实现。
-- 启动时校验必填项，缺失即报错退出（go-style 允许的装配期 panic 场景）；多环境用同一文件＋环境变量覆盖，不搞 per-env 文件矩阵。
+- 加载唯一入口：`pkg/conf` 的 `MustLoad(configFile string, obj any)`——读文件并严格绑定到配置结构体（未知键报错），不做环境变量覆盖，配置以文件为准。
+- 校验必填项：配置结构体实现 `Validate() error`，`MustLoad` 绑定后自动调用，失败即 panic 退出（go-style 允许的装配期 panic 场景）。
+- 多环境：部署侧提供不同的配置文件（挂载或以启动参数指定路径），不在代码里搭环境变量映射层。
 
 ## 数据库迁移
 

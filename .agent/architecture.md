@@ -60,14 +60,15 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 
 | 层 | 可以 import | 不可以 import |
 |---|---|---|
-| cmd | 本服务 server、service、biz、data、`pkg/`（仅装配期构造与注入） | 其他服务的任何层 |
+| cmd | 本服务 server、service、biz、data（仅装配期构造与注入） | 其他服务的任何层 |
 | server | 本服务 service、本服务 api(pb) | biz、data |
 | service | 本服务 api(pb)、本服务 biz | data |
-| biz | 标准库、`pkg/`（领域无关工具） | api(pb)、service、data、任何存储驱动 |
+| biz | 本服务内不 import 任何其他层 | api(pb)、service、data、任何存储驱动 |
 | data | 本服务 biz（为实现其接口）、下游服务的 api(pb 客户端桩) | service、server |
 
 要点：
 
+- 本表只约束服务内部层与层之间、以及跨服务的可见性；标准库与 `pkg/`（领域无关工具）对所有层开放，不必逐行列举。
 - pb 类型止步于 service 层，biz 只见领域类型；转换代码写在 service。
 - biz 定义接口、data 实现（依赖倒置），装配在 cmd 用构造函数手工注入，不引 DI 框架。
 - **跨服务红线**：服务间禁止 import 彼此的 `internal/{service}`；跨服务调用一律走对方 pb 接口，gRPC 客户端归调用方 data 层持有。共享代码只能进 `pkg/`，且必须领域无关、不含业务逻辑。

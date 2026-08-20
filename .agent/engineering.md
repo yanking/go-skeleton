@@ -62,6 +62,7 @@
 
 - Conventional Commits：`feat|fix|refactor|docs|test|chore(scope): 中文描述`；scope 用服务或模块名（如 `user`、`proto`、`makefile`）。
 - 提交前 `make lint && make test` 必须全绿（宪法第五条的落地点）。
+- Bootstrap 期例外（与 `make breaking` 同策略）：Makefile 尚未落地前，改跑 `gofmt -l . && go vet ./... && go test -race ./... && go build ./...`，并在提交说明注明所用命令与结果；Makefile 落地后本例外即失效。
 - 一次提交一件事；proto 变更（含生成物）与对应业务实现可同提交，但不得混入无关重构。
 
 ## CI 基线（落地时按此搭）

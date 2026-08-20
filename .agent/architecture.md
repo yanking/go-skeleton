@@ -35,7 +35,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── buf.gen.yaml              # 生成插件配置
 ├── Makefile                  # 命令契约唯一载体（定义见 engineering.md）
 ├── .golangci.yml             # 静态检查配置（含 generated 排除，见 go-style.md 适用范围）
-├── .gitignore                # 忽略 bin/ 与 .claude/reports/（审计报告不入库）
+├── .gitignore                # 忽略 bin/ 与 .claude/（settings.json 除外，报告与备份不入库）
 ├── go.mod / go.sum           # 单一 module，多服务共用
 ├── cmd/{service}/            # main：读配置、构造注入、启动双端口、优雅退出
 ├── configs/{service}.yaml    # 每服务一份配置样例，运行时可被环境变量覆盖

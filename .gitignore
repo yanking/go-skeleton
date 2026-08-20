@@ -1,5 +1,6 @@
 # 构建产物（目录契约：不入库）
 /bin/
 
-# 本地审计报告与会话产物（不入库）
-/.claude/reports/
+# 本地会话产物：报告、备份等一律不入库（适配器 settings.json 除外）
+/.claude/*
+!/.claude/settings.json

@@ -37,7 +37,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── .golangci.yml             # 静态检查配置（含 generated 排除，见 go-style.md 适用范围）
 ├── .gitignore                # 忽略 bin/ 与 .claude/（settings.json 除外，报告与备份不入库）
 ├── go.mod / go.sum           # 单一 module，多服务共用
-├── cmd/{service}/            # main：读配置、构造注入、启动双端口、优雅退出
+├── cmd/{service}/            # main：读配置、造根 ctx、构造组件并注入，交由 pkg/app 编排启停
 ├── configs/{service}.yaml    # 每服务一份配置，经 pkg/conf.MustLoad 绑定到结构体
 ├── migrations/{service}/     # golang-migrate 纯 SQL 迁移文件（工作流见 engineering.md）
 ├── docs/                     # 业务与产品文档：人类主编，AI 仅在用户明示时写入；AI 规范勿入
@@ -48,6 +48,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │       ├── biz/              # 领域逻辑；定义仓储接口；不感知传输与存储
 │       └── data/             # 实现 biz 的接口：数据库、缓存、下游服务客户端
 ├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
+│   ├── app/                  # 生命周期编排：Run(ctx) 按序拉起、逆序停止
 │   └── conf/                 # 配置加载：MustLoad(configFile, obj)
 ├── openapi/                  # 生成的 OpenAPI 文档，禁手改
 └── bin/                      # make build 产物，不入库
@@ -59,7 +60,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 
 | 层 | 可以 import | 不可以 import |
 |---|---|---|
-| cmd | 本服务 server、service、biz、data（仅装配期构造与注入） | 其他服务的任何层 |
+| cmd | 本服务 server、service、biz、data、`pkg/`（仅装配期构造与注入） | 其他服务的任何层 |
 | server | 本服务 service、本服务 api(pb) | biz、data |
 | service | 本服务 api(pb)、本服务 biz | data |
 | biz | 标准库、`pkg/`（领域无关工具） | api(pb)、service、data、任何存储驱动 |
@@ -87,4 +88,10 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 鉴权拦截器带按完整方法名（`info.FullMethod`）的放行清单：`grpc.health.v1.Health/*` 默认在列；`/healthz` 同理不做业务鉴权。
 - 元端点清单（宪法第一条例外的全集）：`GET /healthz`。新增须经用户批准并同步更新本清单。
 - 日志：`log/slog` 结构化输出。分级：Debug=开发排查细节；Info=正常业务里程碑（默认级）；Warn=可自愈异常或降级；Error=需人介入的失败。公共字段统一 `trace_id`、`service`、`method`；级别经配置可调。请求出入口日志由拦截器统一打，业务代码不重复打「进入 / 退出」。
-- 优雅退出：cmd 监听 SIGINT/SIGTERM，顺序：停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC（配超时，默认 10s 可配置，超时转 `Stop()` 强制终止）→ 关闭 data 资源。
+- 优雅退出：编排唯一实现在 `pkg/app`。cmd 用 `signal.NotifyContext` 监听 SIGINT/SIGTERM 造出根 ctx 传给 `app.Run(ctx)`；app 只对 ctx 取消做反应，不监听信号、不自造根 ctx。
+- 组件契约：`Start(ctx)` 阻塞运行常驻循环（`return srv.Serve(ln)` 即可，不必自起 goroutine、不必自建错误上报 channel），`Stop(ctx)` 让它停下；无常驻循环的资源型组件（data、gateway 环回 ClientConn）`Start` 直接返回 nil。监听端口在装配期建好（cmd 里 `net.Listen`，起不来当场 panic），不放进 `Start`——app 按注册顺序拉起，但不判断也不等待就绪。
+- 组件无需过滤 `http.ErrServerClosed` / `grpc.ErrServerStopped`：只有 app 知道停机是不是它自己发起的，故停机期收到的 `Start` 返回值一律按预期处理，只有非停机期的非 nil 返回才算致命错误。这条不能反过来压给组件——没有信息的一方判断不了。
+- 停机顺序：注册顺序即拉起顺序、其逆序即停止顺序。约定按 `data → gRPC → gateway 环回 ClientConn → HTTP` 注册，于是停机为「停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC → 关闭 data 资源」。`pkg/app` 收的是变长组件切片、不校验顺序，写反了编译期与运行期都不报错，仍须 cmd 遵守本约定。
+- 停机总超时由全部组件共享（非每组件），默认 10s 经配置可调。某组件 `Stop` 在宽限期内没返回，app 放弃等待、继续停下一个（被放弃的 `Stop` goroutine 就此漏下，进程正在退出，代价可接受）；剩余组件仍会被调用 `Stop`，只是拿到已过期的 ctx，应立即强制终止（gRPC 即 `GracefulStop` 转 `Stop()`）。跳过等于资源不释放。
+- 组件意外退出（非停机期 `Start` 返回非 nil，如监听器被意外关闭）触发同一套停机流程，并由 `Run` 返回该错误；cmd 据此以非零码退出（`if err := app.Run(ctx); err != nil { os.Exit(1) }`），避免「端口已死、进程还活着」。
+- Component 适配器归属：由组件所属层自行导出——`server` 出传输组件（gRPC、HTTP、gateway 环回 ClientConn），`data` 出资源组件（连接池等），cmd 只负责按顺序注册；适配器可 import `pkg/app`。

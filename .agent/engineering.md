@@ -35,7 +35,7 @@
 
 1. 建 `api/{service}/v1/{service}.proto`：RPC ＋ `google.api.http` 注解 ＋ protovalidate 注解，先想清错误码；
 2. 跑 `make api`（及 `make breaking`，首次落库轮次按上表跳过）；
-3. 建 `internal/{service}/{server,service,biz,data}` 四层与 `cmd/{service}/main.go`（装配注入、双端口、健康检查、优雅退出）；
+3. 建 `internal/{service}/{server,service,biz,data}` 四层与 `cmd/{service}/main.go`（装配注入、双端口、健康检查；监听器在装配期 `net.Listen`，根 ctx 经 `signal.NotifyContext` 生成，启停与优雅退出交由 `pkg/app` 编排，`app.Run` 返回非 nil 即以非零码退出）；
 4. 建 `configs/{service}.yaml`；若碰数据库，建 `migrations/{service}/` 并写首个迁移（up/down 成对）；
 5. `make run SERVICE={service}` 实测双协议与 `/healthz`，再全量 `make all`（宪法第五条）。
 
@@ -44,6 +44,7 @@
 - 每服务一份 `configs/{service}.yaml`；解析用 `gopkg.in/yaml.v3`，不引重型配置框架。
 - 加载唯一入口：`pkg/conf` 的 `MustLoad(configFile string, obj any)`——读文件并严格绑定到配置结构体（未知键报错），不做环境变量覆盖，配置以文件为准。
 - 校验必填项：配置结构体实现 `Validate() error`，`MustLoad` 绑定后自动调用，失败即 panic 退出（go-style 允许的装配期 panic 场景）。
+- 运行参数（如停机总超时）由服务自己的配置结构体承载，cmd 装配时把加载好的值显式填进 `pkg/app.Config`——`pkg/app` 只认 Go 结构体，不碰 YAML；字段名不强制统一，但须在该服务的 `configs/{service}.yaml` 里注释说明。
 - 多环境：部署侧提供不同的配置文件（挂载或以启动参数指定路径），不在代码里搭环境变量映射层。
 
 ## 数据库迁移

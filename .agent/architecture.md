@@ -42,12 +42,13 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── migrations/{service}/     # golang-migrate 纯 SQL 迁移文件（工作流见 engineering.md）
 ├── docs/                     # 业务与产品文档：人类主编，AI 仅在用户明示时写入；AI 规范勿入
 ├── internal/
-│   ├── {service}/            # 每服务一套四层，服务间禁止互相 import
-│   │   ├── server/           # 传输装配：gRPC server、gateway mux、拦截器注册
-│   │   ├── service/          # 实现 pb 生成的 {Service}Server；出入参转换与映射错误码
-│   │   ├── biz/              # 领域逻辑；定义仓储接口；不感知传输与存储
-│   │   └── data/             # 实现 biz 的接口：数据库、缓存、下游服务客户端
-│   └── pkg/                  # 跨服务共享的领域无关工具（谨慎准入，禁止业务逻辑）
+│   └── {service}/            # 每服务一套四层，服务间禁止互相 import
+│       ├── server/           # 传输装配：gRPC server、gateway mux、拦截器注册
+│       ├── service/          # 实现 pb 生成的 {Service}Server；出入参转换与映射错误码
+│       ├── biz/              # 领域逻辑；定义仓储接口；不感知传输与存储
+│       └── data/             # 实现 biz 的接口：数据库、缓存、下游服务客户端
+├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
+│   └── conf/                 # 配置加载：MustLoad(configFile, obj)
 ├── openapi/                  # 生成的 OpenAPI 文档，禁手改
 └── bin/                      # make build 产物，不入库
 ```
@@ -61,14 +62,14 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 | cmd | 本服务 server、service、biz、data（仅装配期构造与注入） | 其他服务的任何层 |
 | server | 本服务 service、本服务 api(pb) | biz、data |
 | service | 本服务 api(pb)、本服务 biz | data |
-| biz | 标准库、internal/pkg | api(pb)、service、data、任何存储驱动 |
+| biz | 标准库、`pkg/`（领域无关工具） | api(pb)、service、data、任何存储驱动 |
 | data | 本服务 biz（为实现其接口）、下游服务的 api(pb 客户端桩) | service、server |
 
 要点：
 
 - pb 类型止步于 service 层，biz 只见领域类型；转换代码写在 service。
 - biz 定义接口、data 实现（依赖倒置），装配在 cmd 用构造函数手工注入，不引 DI 框架。
-- **跨服务红线**：服务间禁止 import 彼此的 `internal/{service}`；跨服务调用一律走对方 pb 接口，gRPC 客户端归调用方 data 层持有。共享代码只能进 `internal/pkg`，且必须领域无关。
+- **跨服务红线**：服务间禁止 import 彼此的 `internal/{service}`；跨服务调用一律走对方 pb 接口，gRPC 客户端归调用方 data 层持有。共享代码只能进 `pkg/`，且必须领域无关、不含业务逻辑。
 
 ## 协议层规则
 

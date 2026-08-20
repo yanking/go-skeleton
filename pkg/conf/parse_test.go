@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/yanking/go-skeleton/internal/pkg/conf"
+	"github.com/yanking/go-skeleton/pkg/conf"
 )
 
 // dbConf 测试用嵌套配置段。

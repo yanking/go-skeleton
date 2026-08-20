@@ -42,7 +42,7 @@
 ## 配置
 
 - 每服务一份 `configs/{service}.yaml`；解析用 `gopkg.in/yaml.v3`，不引重型配置框架。
-- 环境变量覆盖：`APP_` 前缀＋下划线路径映射（如 `APP_SERVER_GRPC_PORT` 覆盖 `server.grpc_port`），实现为 `internal/pkg` 的小函数。
+- 环境变量覆盖：`APP_` 前缀＋下划线路径映射（如 `APP_SERVER_GRPC_PORT` 覆盖 `server.grpc_port`），由 `pkg/conf` 的 `MustLoad(configFile string, obj any)` 统一实现。
 - 启动时校验必填项，缺失即报错退出（go-style 允许的装配期 panic 场景）；多环境用同一文件＋环境变量覆盖，不搞 per-env 文件矩阵。
 
 ## 数据库迁移

@@ -46,13 +46,16 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │       ├── server/           # 薄装配层：构造 service 实现、组好注册闭包与自有拦截器，交给 pkg/transport
 │       ├── service/          # 实现 pb 生成的 {Service}Server；出入参转换与映射错误码
 │       ├── biz/              # 领域逻辑；定义仓储接口；不感知传输与存储
-│       └── data/             # 实现 biz 的接口：数据库、缓存、下游服务客户端
+│       └── data/             # 实现 biz 的接口；连接收在未导出字段的 Data 结构里
 ├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
 │   ├── app/                  # 生命周期编排：Run(ctx) 按序拉起、逆序停止
 │   ├── conf/                 # 配置加载：MustLoad(configFile, obj)
 │   ├── log/                  # 日志构造：MustNew(Config) 出 *slog.Logger
 │   ├── telemetry/            # 可观测性：MustNew(ctx, Config) 出 trace/metric provider
-│   └── transport/            # 传输层：MustNew(ctx, Config) 出双协议组件，Components() 交给 app
+│   ├── transport/            # 传输层：MustNew(ctx, Config) 出双协议组件，Components() 交给 app
+│   ├── mysql/                # MySQL 连接池：MustNew(ctx, Config) 出内嵌 *sql.DB 的 Client
+│   ├── postgres/             # PostgreSQL 连接池：同上，走 pgx/v5/stdlib
+│   └── redis/                # Redis 连接池：MustNew(ctx, Config) 出内嵌 *goredis.Client 的 Client
 ├── openapi/                  # 生成的 OpenAPI 文档，禁手改
 └── bin/                      # make build 产物，不入库
 ```
@@ -74,6 +77,11 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 本表只约束服务内部层与层之间、以及跨服务的可见性；标准库与 `pkg/`（领域无关工具）对所有层开放，不必逐行列举。
 - pb 类型止步于 service 层，biz 只见领域类型；转换代码写在 service。
 - biz 定义接口、data 实现（依赖倒置），装配在 cmd 用构造函数手工注入，不引 DI 框架。
+- data 层用一个**字段全部未导出**的 `Data` 结构持有本服务全部存储连接，由 cmd 在装配期以 `pkg/{mysql,postgres,redis}` 的内嵌句柄（`db.DB`、`rdb.Client`）构造；各 repository 一律只收 `*Data`，于是新增存储组件只需改 `Data` 与 cmd 两个文件，已有 repository 一个字都不用动。
+  - 字段必须未导出：这是「biz 不得绕过仓储直接查库」这条红线的**编译期**保障，包外访问会直接得到 `cannot refer to unexported field`。改成导出字段（或跨层的 svcCtx）能再省一处改动，但等于把这条路重新打开，不划算。
+  - 往下传的是 `*sql.DB` / `*goredis.Client` 这类标准或第三方类型，**不是** `*mysql.Client`：后者带着 `Start`/`Stop`，传给 repository 等于把关停全服务连接池的能力也给了它；收标准类型还让 data 层对 `pkg/` 零依赖，测试时直接给一个自开的 `*sql.DB` 即可。
+  - `NewData` 用位置参数，不用选项模式：加组件时两者改动处数相同（选项模式只是把「改签名」换成「加一个 `WithXxx` 函数」，cmd 那行照样要改），而位置参数多买到一条——漏传直接编译不过，选项模式漏写 `WithXxx` 要到第一个查询才 nil panic。存储真涨到 5 个以上再换 `Deps` 结构体并补 nil 校验 panic，但那时更该先问边界是不是划错了。
+  - `Data` **不能**内嵌各存储的 Client：三个包的类型都叫 `Client`，内嵌即 `Client redeclared`；退而内嵌底层句柄则 `d.Close()` 是 `ambiguous selector`，且 `Start`/`Stop`/`Name` 会被提升，让 `Data` 意外满足 `app.Component`。
 - **跨服务红线**：服务间禁止 import 彼此的 `internal/{service}`；跨服务调用一律走对方 pb 接口，gRPC 客户端归调用方 data 层持有。共享代码只能进 `pkg/`，且必须领域无关、不含业务逻辑。
 
 ## 协议层规则
@@ -107,8 +115,13 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 优雅退出：编排唯一实现在 `pkg/app`。cmd 用 `signal.NotifyContext` 监听 SIGINT/SIGTERM 造出根 ctx 传给 `app.Run(ctx)`；app 只对 ctx 取消做反应，不监听信号、不自造根 ctx。
 - 组件契约：`Start(ctx)` 阻塞运行常驻循环（`return srv.Serve(ln)` 即可，不必自起 goroutine、不必自建错误上报 channel），`Stop(ctx)` 让它停下；无常驻循环的资源型组件（data、gateway 环回 ClientConn）`Start` 直接返回 nil。监听端口在装配期建好（传输层由 `pkg/transport.MustNew` 内部 `net.Listen`，起不来当场 panic），不放进 `Start`——app 按注册顺序拉起，但不判断也不等待就绪。
 - 组件无需过滤 `http.ErrServerClosed` / `grpc.ErrServerStopped`：只有 app 知道停机是不是它自己发起的，故停机期收到的 `Start` 返回值一律按预期处理，只有非停机期的非 nil 返回才算致命错误。这条不能反过来压给组件——没有信息的一方判断不了。
-- 停机顺序：注册顺序即拉起顺序、其逆序即停止顺序。约定按 `telemetry → data → gRPC → gateway 环回 ClientConn → HTTP` 注册，于是停机为「停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC → 关闭 data 资源 → 最后关 telemetry」。telemetry 排最前（= 最后停）是有意的：前面所有组件停机期间产生的 span 与 metric 都还能被记录，并在最后一步 flush 出去；反过来注册的话，停机过程本身就是黑的，而那恰恰是最需要看清楚的时候。`pkg/app` 收的是变长组件切片、不校验顺序，写反了编译期与运行期都不报错，仍须 cmd 遵守本约定。
+- 停机顺序：注册顺序即拉起顺序、其逆序即停止顺序。约定按 `telemetry → data（mysql / postgres / redis 等连接池）→ gRPC → gateway 环回 ClientConn → HTTP` 注册，于是停机为「停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC → 关闭 data 资源 → 最后关 telemetry」。telemetry 排最前（= 最后停）是有意的：前面所有组件停机期间产生的 span 与 metric 都还能被记录，并在最后一步 flush 出去；反过来注册的话，停机过程本身就是黑的，而那恰恰是最需要看清楚的时候。`pkg/app` 收的是变长组件切片、不校验顺序，写反了编译期与运行期都不报错，仍须 cmd 遵守本约定。
 - 停机总超时由全部组件共享（非每组件），默认 30s 经配置可调，对齐 K8s `terminationGracePeriodSeconds` 的默认值；**该值必须小于部署侧给进程的宽限期，且要留余量**——两者取等意味着停机刚跑满，收尾日志与进程退出还没做完就被 SIGKILL，所以 Deployment 那边应配成比它大几秒（如 40s）。某组件 `Stop` 在宽限期内没返回，app 放弃等待、继续停下一个（被放弃的 `Stop` goroutine 就此漏下，进程正在退出，代价可接受）；剩余组件仍会被调用 `Stop`，只是拿到已过期的 ctx，应立即强制终止（gRPC 即 `GracefulStop` 转 `Stop()`）。跳过等于资源不释放。
 - 组件意外退出（非停机期 `Start` 返回非 nil，如监听器被意外关闭）触发同一套停机流程，并由 `Run` 返回该错误；cmd 据此以非零码退出（`if err := app.Run(ctx); err != nil { os.Exit(1) }`），避免「端口已死、进程还活着」。
 - Component 适配器归属：传输组件（gRPC、gateway 环回 ClientConn、HTTP）由 `pkg/transport.Components()` 统一导出并已排好序，cmd 直接 append；`data` 出资源组件（连接池等）；cmd 只负责把 telemetry、data 与传输组件按约定顺序拼起来。
+- 存储连接构造在 `pkg/{mysql,postgres,redis}`，**只出连接、不出仓储**：仓储属 data 层，由它实现 biz 定义的接口。三个包各自导出 `MustNew(ctx, Config) *Client`，`Client` 内嵌底层句柄（`*sql.DB` / `*goredis.Client`），故 `QueryContext`、`Get` 等方法可直接调用，需要原始句柄时取内嵌字段；方法集满足 `app.Component`，连接池由 cmd 注册进 app，忘不掉关。
+- 三个存储包**刻意不合并**：`database/sql` 驱动靠 blank import 的 `init()` 注册，合成一个包会让只用 MySQL 的服务白白链上 pgx——实测二进制 7.2MB → 13.5MB。代价是 `pkg/mysql` 与 `pkg/postgres` 有约 70 行同形代码，这份重复是为「每个服务只付自己用到的那份」买的单。
+- PostgreSQL 出口是 `*sql.DB`（走 `pgx/v5/stdlib`）而非 `*pgxpool.Pool`：与 MySQL 形状一致，data 层写法互通，golang-migrate 与 sqlc 也直接可用。代价是拿不到 `COPY FROM`、`LISTEN/NOTIFY` 等 PG 独有能力——真需要时经 `c.Conn(ctx)` 再 `conn.Raw(...)` 取底层 pgx 连接，不是死路。
+- 存储连接在装配期探活并重试：`sql.Open` 不建立任何连接，DSN 或密码配错时服务会「启动成功」，K8s 认为 Pod 已就绪并开始导流，直到第一个请求才报错；而探一次就死又会因为「服务与数据库同时启动」的几秒时间差白白 CrashLoopBackOff。故在 `ConnectTimeout`（默认 5s）窗口内每 200ms 重试一次，耗尽才 panic。注意 `database/sql` 的 `Ping` 自身完全不重试（实测连接被拒 182µs 即返回），而 go-redis 内部自带重试、实测能扛约 1.7s——写相关用例时延迟要设在这个阈值之上，否则测到的是 go-redis 而不是本包。
+- 存储埋点经 `otelsql`（SQL）与 `redisotel`（Redis）挂上，provider 显式注入不依赖全局；连接池指标用 `otelsql.RegisterDBStatsMetrics` 注册，`Stop` 必须先注销回调再关连接池——反过来的话连接池已关而回调仍在，下一次采集会读到已关闭的 DB。SQL 查询 span 名为 `sql.conn.query`。
 - `pkg/` 内部允许单向依赖，当前只有 `transport → app`（`Components()` 的返回类型）。其余跨包协作一律用结构化接口：`pkg/telemetry` 不 import `pkg/app` 却满足 `app.Component`，`pkg/transport` 不 import `pkg/telemetry` 却能收它——各方只需知道自己需要的方法集，不必知道对方存在。新增 `pkg/` 内部依赖须走宪法第三条。

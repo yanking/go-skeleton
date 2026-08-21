@@ -219,7 +219,7 @@ func TestStopContextIsDecoupledFromRunContext(t *testing.T) {
 		want        time.Duration // 期望的停机 ctx 剩余时长上限
 	}{
 		{name: "显式配置停机超时", stopTimeout: 3 * time.Second, want: 3 * time.Second},
-		{name: "零值取默认 10s", stopTimeout: 0, want: 10 * time.Second},
+		{name: "零值取默认 30s", stopTimeout: 0, want: 30 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

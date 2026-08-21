@@ -81,3 +81,5 @@ PR 必过五关，顺序执行：
 ## 容器化与发布（占位，有意暂缓）
 
 首个服务跑通 `make all` 后落地，届时补：每服务一镜像的多阶段 Dockerfile（构建参数 SERVICE）、版本号经 `-ldflags` 注入、镜像 tag 对齐 git tag、CI 追加镜像构建关。在此之前不做部署侧约定。
+
+落地时必须一并处理：K8s Deployment 的 `terminationGracePeriodSeconds` 要比服务配置的停机总超时大几秒（`pkg/app` 默认 30s，该字段默认也是 30s，取等没有余量），否则优雅退出的收尾会被 SIGKILL 打断——详见 `architecture.md`「横切关注点」停机条目。

@@ -11,8 +11,10 @@ import (
 	"time"
 )
 
-// defaultStopTimeout 未配置时的停机总超时。
-const defaultStopTimeout = 10 * time.Second
+// defaultStopTimeout 未配置时的停机总超时，对齐 K8s terminationGracePeriodSeconds 的默认值。
+// 注意二者取等只是刚好用满，没有余量：部署侧应把宽限期配得比本值大几秒，
+// 留给收尾日志与进程退出，见 architecture.md「横切关注点」。
+const defaultStopTimeout = 30 * time.Second
 
 // Component 可被 App 编排的生命周期组件。
 //
@@ -41,7 +43,8 @@ type Component interface {
 // Config App 的运行参数，零值即默认。
 type Config struct {
 	// StopTimeout 停机总超时（全部组件共享，非每组件），从开始逆序停止起算。
-	// 超时后各组件的 Stop 仍会被调用，只是拿到已过期的 ctx，应立即强制关闭。零值取 10s。
+	// 超时后各组件的 Stop 仍会被调用，只是拿到已过期的 ctx，应立即强制关闭。零值取 30s。
+	// 该值须 ≤ 部署侧给进程的宽限期，否则超出的部分只是纸面预算。
 	StopTimeout time.Duration
 	// Logger 生命周期日志输出，nil 时用 slog.Default()。
 	Logger *slog.Logger

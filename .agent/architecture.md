@@ -49,7 +49,8 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │       └── data/             # 实现 biz 的接口：数据库、缓存、下游服务客户端
 ├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
 │   ├── app/                  # 生命周期编排：Run(ctx) 按序拉起、逆序停止
-│   └── conf/                 # 配置加载：MustLoad(configFile, obj)
+│   ├── conf/                 # 配置加载：MustLoad(configFile, obj)
+│   └── log/                  # 日志构造：MustNew(Config) 出 *slog.Logger
 ├── openapi/                  # 生成的 OpenAPI 文档，禁手改
 └── bin/                      # make build 产物，不入库
 ```
@@ -88,7 +89,10 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 观测**不在拦截器链上**：`otelgrpc.NewServerHandler` 是 `stats.Handler`，经 `grpc.StatsHandler` 注册，先于整条拦截器链触发（日志拦截器因此总能拿到已开启的 span）。改为自实现拦截器属选型变更，走宪法第三条。
 - 鉴权拦截器带按完整方法名（`info.FullMethod`）的放行清单：`grpc.health.v1.Health/*` 默认在列；`/healthz` 同理不做业务鉴权。
 - 元端点清单（宪法第一条例外的全集）：`GET /healthz`。新增须经用户批准并同步更新本清单。
-- 日志：`log/slog` 结构化输出。分级：Debug=开发排查细节；Info=正常业务里程碑（默认级）；Warn=可自愈异常或降级；Error=需人介入的失败。公共字段统一 `trace_id`、`service`、`method`；级别经配置可调。请求出入口日志由拦截器统一打，业务代码不重复打「进入 / 退出」。
+- 日志：`log/slog` 结构化输出。分级：Debug=开发排查细节；Info=正常业务里程碑（默认级）；Warn=可自愈异常或降级；Error=需人介入的失败。公共字段统一 `trace_id`、`service`、`method`。请求出入口日志由拦截器统一打，业务代码不重复打「进入 / 退出」。
+- Logger 构造唯一入口 `pkg/log.MustNew(Config)`：`service` 由 Config 必填项写入每条日志；格式（json 默认 / text）、级别、是否带调用点均经配置可调。服务配置结构体里的字段直接写 `slog.Level` 与 `log.Format`，二者都实现了 `encoding.TextUnmarshaler`，YAML 写 `level: info`（大小写不敏感，还支持 `info+2` 偏移）、`format: json` 即可绑定，拼错在 `conf.MustLoad` 阶段就报错，不必等到 `MustNew`。`Config.Level` 收的是 `slog.Leveler`（`slog.Level` 天然满足），要运行期调级则由调用方自持 `*slog.LevelVar` 传入，`pkg/log` 不代管该变量、也不提供调级端点（加端点须先扩元端点清单）。构造出的 Logger 由 cmd 注入各组件与 `pkg/app.Config.Logger`；本包不调 `slog.SetDefault`，是否接管全局由 cmd 决定。
+- 随请求变化的字段（`trace_id`、`user_id` 等）经 `pkg/log.Extractor`（`func(ctx) []slog.Attr`）注入，在 cmd 装配期注册。因此 `pkg/log` 不依赖 OpenTelemetry：接 OTel 那轮在 `server` 层写一个读 `trace.SpanContextFromContext` 的 Extractor 注册进去即可，`pkg/log` 一行不改。Extractor 契约：不 panic、不阻塞、不在内部再打日志（会无限递归）；Handler 不做防御性 recover——它跑在日志热路径上且是装配期自己写的代码，出问题应当场暴露而非静默丢字段。
+- 包装 `slog.Handler` 时若内嵌 `slog.Handler` 而不覆写 `WithAttrs` / `WithGroup`，派生 Logger 会退回底层 Handler、包装静默失效（日志照打、不报错）。`pkg/log` 已覆写并有用例锁住，自行再包 Handler 时须照做。另注意：`WithGroup` 之后 Extractor 追加的字段会落进该组内而非顶层，公共字段应在未开组的 Logger 上打。
 - 优雅退出：编排唯一实现在 `pkg/app`。cmd 用 `signal.NotifyContext` 监听 SIGINT/SIGTERM 造出根 ctx 传给 `app.Run(ctx)`；app 只对 ctx 取消做反应，不监听信号、不自造根 ctx。
 - 组件契约：`Start(ctx)` 阻塞运行常驻循环（`return srv.Serve(ln)` 即可，不必自起 goroutine、不必自建错误上报 channel），`Stop(ctx)` 让它停下；无常驻循环的资源型组件（data、gateway 环回 ClientConn）`Start` 直接返回 nil。监听端口在装配期建好（cmd 里 `net.Listen`，起不来当场 panic），不放进 `Start`——app 按注册顺序拉起，但不判断也不等待就绪。
 - 组件无需过滤 `http.ErrServerClosed` / `grpc.ErrServerStopped`：只有 app 知道停机是不是它自己发起的，故停机期收到的 `Start` 返回值一律按预期处理，只有非停机期的非 nil 返回才算致命错误。这条不能反过来压给组件——没有信息的一方判断不了。

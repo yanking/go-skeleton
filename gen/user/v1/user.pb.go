@@ -24,16 +24,16 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// User 用户。
+// 用户
 type User struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// id 用户 ID，创建时由服务端分配。
+	// 用户 ID，创建时由服务端分配。
 	Id int64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
-	// name 用户名。
+	// 用户名，1~32 字符。
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// email 邮箱。
+	// 邮箱，全局唯一。
 	Email string `protobuf:"bytes,3,opt,name=email,proto3" json:"email,omitempty"`
-	// created_at 创建时间。
+	// 创建时间，由数据库默认值填充。
 	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -97,12 +97,12 @@ func (x *User) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
-// CreateUserRequest 创建用户的入参。校验注解由拦截器统一执行，service 层不重复校验。
+// 创建用户的入参。校验注解由拦截器统一执行，service 层不重复校验。
 type CreateUserRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// name 用户名，1~32 字符。
+	// 用户名，1~32 字符。
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// email 邮箱，须为合法邮箱格式。
+	// 邮箱，须为合法邮箱格式。
 	Email         string `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -152,10 +152,10 @@ func (x *CreateUserRequest) GetEmail() string {
 	return ""
 }
 
-// CreateUserResponse 创建用户的出参。
+// 创建用户的出参。
 type CreateUserResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// user 新建成功的用户。
+	// 新建的用户。
 	User          *User `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -198,10 +198,10 @@ func (x *CreateUserResponse) GetUser() *User {
 	return nil
 }
 
-// GetUserRequest 取用户的入参。
+// 取用户的入参。
 type GetUserRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// id 用户 ID，须为正数。
+	// 用户 ID，须为正数。
 	Id            int64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -244,10 +244,10 @@ func (x *GetUserRequest) GetId() int64 {
 	return 0
 }
 
-// GetUserResponse 取用户的出参。
+// 取用户的出参。
 type GetUserResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// user 查到的用户。
+	// 查到的用户。
 	User          *User `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

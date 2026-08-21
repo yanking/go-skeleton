@@ -99,6 +99,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 每个 RPC 必须写 `google.api.http` 注解——HTTP 路由在 proto 里就是文档。
 - 路由风格：资源名词复数 + 标准方法（`GET /v1/users/{id}`、`POST /v1/users`）；自定义动作用 `POST /v1/users/{id}:activate` 形式。
 - 接口文档由 `protoc-gen-openapiv3` 从 proto 生成 OpenAPI **3.1.0** 到 `openapi/`，禁手写。proto 上的注释会成为 `summary` / `description`，`google.rpc.Status` 作为 `default` 错误响应自动注入。已知缺口：protovalidate 的校验规则（`min_len`、`email` 等）**不会**出现在文档 schema 里——插件不读这个扩展，调用方据文档生成的客户端不会带上这些约束，只能到服务端才被 `InvalidArgument` 打回。补它要引新插件，走宪法第三条。
+- proto 注释即对外文档正文，**按文档优先写，不套用 Go 的「以符号名开头」惯例**（那条只管手写 Go）。RPC 注释首行是短标题：不带句号、不重复方法名——它进 `summary`，被阅读器当标题渲染，重复的方法名旁边已经显示了；空 `//` 行之后是详情，进 `description`。`protoc-gen-openapiv3` 正是按这个空行分段。service、message、字段的注释整体进 `description`，按散文写（句号照常），同样不重复符号名。详情写调用方需要知道的事（错误码、字段约束、唯一性），不写仓库内部约定——那些属于 `.agent/`。字段的约束尤其要写进注释：protovalidate 规则不会进 schema（见上条缺口），注释是它到达调用方的唯一通道。
 - 错误模型：service 层把 biz 错误集中映射为 `google.golang.org/grpc/status`（codes + errdetails），gateway 自动转 HTTP 状态码；错误码映射表随 service 维护，只在这一处翻译。
 - 参数校验：proto 层用 protovalidate 注解声明，由 `pkg/transport` 的校验拦截器统一执行（排在链尾、最靠近 handler，鉴权等自有拦截器先跑）；service 只做注解表达不了的业务校验。校验失败返回 `InvalidArgument` 并把违规明细作为 errdetails 回给调用方——这类错误是调用方自己能修好的，说清哪个字段不对才有意义，与「未预期错误不泄露内部信息」不冲突（后者针对服务端自身故障）。
 - data 层的 SQL 访问代码由 sqlc 生成，**SQL 是事实源**，与 proto 同一套原则：SQL 写在 `internal/{service}/data/query/*.sql`，生成物落在 `internal/{service}/data/sqlc/`，禁手改，随源同提交。schema 直接指向 `migrations/{service}/`——迁移即 schema，不另维护一份，两者漂移的可能从根上消除（sqlc 自动忽略 `.down.sql`）。

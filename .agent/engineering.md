@@ -71,7 +71,7 @@
 需要真实中间件的用例一律经环境变量开关，未配即 `t.Skip`——CI 基线里没有数据库，`make test` 必须在裸环境下全绿。
 
 - Redis 不需要外部服务：`pkg/redis` 用 `miniredis`（进程内的真 Redis 实现，走真实协议）作被测服务端，始终参与 `make test`。
-- MySQL / PostgreSQL 没有等价的进程内实现，用例读 `MYSQL_DSN` / `POSTGRES_DSN`。本地起容器：
+- MySQL / PostgreSQL 不用进程内替身，用例读 `MYSQL_DSN` / `POSTGRES_DSN`。**不是没有**：`dolthub/go-mysql-server` 就是进程内的 MySQL wire 实现（Dolt 的底座），DSN 与 sqlc 查询都不用改。不用它是因为它的不兼容是**静默**的——事务未实现，`COMMIT` / `ROLLBACK` 是 no-op，索引走全表扫。现在 data 层还没用事务所以看不出差别，但 sqlc 已经生成了 `WithTx`，谁一写事务就会「测试全绿、生产出事」。SQLite 内存库同理不可选：`AUTO_INCREMENT`、`ENGINE=InnoDB`、`utf8mb4` 都要另写一套 DDL 与查询，等于把 sqlc「SQL 是唯一事实源」的前提拆了。本地起容器：
 
 ```
 docker run -d --name skel-mysql -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=skeleton -p 53306:3306 mysql:8

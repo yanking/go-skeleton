@@ -27,11 +27,17 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// UserService 用户服务。HTTP 路由由 google.api.http 注解声明，接口文档由本文件生成。
+// 用户服务
+//
+// 用户的创建与查询。错误统一以 google.rpc.Status 返回，HTTP 状态码由 gateway 映射。
 type UserServiceClient interface {
-	// CreateUser 创建用户。
+	// 创建用户
+	//
+	// 邮箱全局唯一，已被占用时返回 AlreadyExists；参数校验失败返回 InvalidArgument 并附带违规字段明细。
 	CreateUser(ctx context.Context, in *CreateUserRequest, opts ...grpc.CallOption) (*CreateUserResponse, error)
-	// GetUser 按 ID 取用户。
+	// 按 ID 取用户
+	//
+	// 用户不存在时返回 NotFound。
 	GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*GetUserResponse, error)
 }
 
@@ -67,11 +73,17 @@ func (c *userServiceClient) GetUser(ctx context.Context, in *GetUserRequest, opt
 // All implementations must embed UnimplementedUserServiceServer
 // for forward compatibility.
 //
-// UserService 用户服务。HTTP 路由由 google.api.http 注解声明，接口文档由本文件生成。
+// 用户服务
+//
+// 用户的创建与查询。错误统一以 google.rpc.Status 返回，HTTP 状态码由 gateway 映射。
 type UserServiceServer interface {
-	// CreateUser 创建用户。
+	// 创建用户
+	//
+	// 邮箱全局唯一，已被占用时返回 AlreadyExists；参数校验失败返回 InvalidArgument 并附带违规字段明细。
 	CreateUser(context.Context, *CreateUserRequest) (*CreateUserResponse, error)
-	// GetUser 按 ID 取用户。
+	// 按 ID 取用户
+	//
+	// 用户不存在时返回 NotFound。
 	GetUser(context.Context, *GetUserRequest) (*GetUserResponse, error)
 	mustEmbedUnimplementedUserServiceServer()
 }

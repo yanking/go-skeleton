@@ -7,7 +7,8 @@
 | Go ≥ 1.24 | 语言与构建 | go.mod `go` 指令 |
 | buf | proto 的 lint / breaking / 生成统一入口 | Makefile 钉版本并提供安装目标 |
 | protoc-gen-go / go-grpc / grpc-gateway / openapiv2 | 代码与接口文档生成 | go.mod `tool` 指令钉死，经 `go tool` 调用 |
-| protovalidate | 参数校验：`buf.yaml` 依赖 `buf.build/bufbuild/protovalidate`（注解），Go 侧 `github.com/bufbuild/protovalidate-go`（拦截器执行） | go.mod 常规依赖钉死 |
+| protovalidate | 参数校验：`buf.yaml` 依赖 `buf.build/bufbuild/protovalidate`（注解），Go 侧 `buf.build/go/protovalidate`（拦截器执行；该模块自 v1.x 起已从 `github.com/bufbuild/protovalidate-go` 改名，旧路径 `go get` 会直接报 module path 不匹配） | go.mod 常规依赖钉死 |
+| OpenTelemetry | 可观测性：trace ＋ metrics ＋ runtime 指标，经 `pkg/telemetry` 统一构造 | go.mod 常规依赖钉死；`otel`／`otel/sdk` 系列须同版本，`semconv` 版本必须与 `sdk/resource` 内部使用的一致，否则 `resource.Merge` 会因 schema URL 冲突失败 |
 | golangci-lint | 静态检查，配置在 `.golangci.yml` | Makefile 钉版本（与 buf 同策略；官方不推荐模块 / tool 指令方式安装——MVS 会漂移其内部钉死的 linter 版本） |
 | golang-migrate | 数据库迁移 CLI | Makefile 钉版本 |
 
@@ -44,6 +45,7 @@
 - 每服务一份 `configs/{service}.yaml`；解析用 `gopkg.in/yaml.v3`，不引重型配置框架。
 - 加载唯一入口：`pkg/conf` 的 `MustLoad(configFile string, obj any)`——读文件并严格绑定到配置结构体（未知键报错），不做环境变量覆盖，配置以文件为准。
 - 校验必填项：配置结构体实现 `Validate() error`，`MustLoad` 绑定后自动调用，失败即 panic 退出（go-style 允许的装配期 panic 场景）。
+- 可观测性参数（导出方式、collector 地址、采样率）同样由服务自己的配置结构体承载，导出方式字段用 `telemetry.Exporter` 类型（YAML 直接写 `otlp`／`stdout`／`none`，拼错在 `conf.MustLoad` 阶段就报错），cmd 装配时填进 `pkg/telemetry.Config`。
 - 日志参数（级别、格式、是否带调用点）同样由服务自己的配置结构体承载，级别字段用 `slog.Level` 类型（YAML 直接写 `debug`／`info`／`warn`／`error`），cmd 装配时填进 `pkg/log.Config` 并 `MustNew` 出 Logger 注入各组件。
 - 运行参数（如停机总超时）由服务自己的配置结构体承载，cmd 装配时把加载好的值显式填进 `pkg/app.Config`——`pkg/app` 只认 Go 结构体，不碰 YAML；字段名不强制统一，但须在该服务的 `configs/{service}.yaml` 里注释说明。
 - 多环境：部署侧提供不同的配置文件（挂载或以启动参数指定路径），不在代码里搭环境变量映射层。

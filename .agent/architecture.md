@@ -50,7 +50,8 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
 │   ├── app/                  # 生命周期编排：Run(ctx) 按序拉起、逆序停止
 │   ├── conf/                 # 配置加载：MustLoad(configFile, obj)
-│   └── log/                  # 日志构造：MustNew(Config) 出 *slog.Logger
+│   ├── log/                  # 日志构造：MustNew(Config) 出 *slog.Logger
+│   └── telemetry/            # 可观测性：MustNew(ctx, Config) 出 trace/metric provider
 ├── openapi/                  # 生成的 OpenAPI 文档，禁手改
 └── bin/                      # make build 产物，不入库
 ```
@@ -87,6 +88,12 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 
 - 拦截器链统一注册在 `internal/{service}/server`，顺序：recovery → 日志 → 鉴权 → 参数校验。
 - 观测**不在拦截器链上**：`otelgrpc.NewServerHandler` 是 `stats.Handler`，经 `grpc.StatsHandler` 注册，先于整条拦截器链触发（日志拦截器因此总能拿到已开启的 span）。改为自实现拦截器属选型变更，走宪法第三条。
+- 可观测性构造唯一入口 `pkg/telemetry.MustNew(ctx, Config)`，产出 trace 与 metric 两套 provider ＋ W3C 传播器，并注册 Go runtime 指标（goroutine 数、GC、堆）。导出方式经配置三选一：`otlp`（OTLP/gRPC 发往 collector）、`stdout`（本地调试，同步导出立刻可见）、`none`（零值，测试与本地默认，全局保持 noop、零开销）。日志不走 OTLP——容器里经 stdout 交采集侧，靠 `pkg/log` 打进每条日志的 `trace_id` 与链路关联。
+- 采样固定用 `ParentBased(TraceIDRatioBased(ratio))`，不用裸 ratio：上游已决定采样的请求必须跟随其决定，否则同一条链路会在服务边界断成两截。`SampleRatio` 零值取 1（全采）；要关闭遥测用 `Exporter=none`，不要把采样率设 0——关闭只有一个开关。
+- 即便 `Exporter=none` 也会设置传播器：本服务不采样，但上游传来的 trace context 仍须原样透传给下游（noop tracer 会保留 ctx 中的 SpanContext），否则链路在这个服务这里断开。
+- `pkg/telemetry` 是 `pkg/app` 的资源型组件（`Start` 直接返回 nil，`Stop` 逆序 Shutdown 并 flush），靠结构化接口自动满足 `app.Component`，**不 import `pkg/app`**。不 Shutdown 就会丢掉最后一批 span 与 metric，把它做成组件正是为了让 cmd 忘不掉这一步。
+- 埋点库须显式注入 provider（`otelgrpc.WithTracerProvider(tel.TracerProvider())`、`WithMeterProvider`、`WithPropagators`），不依赖全局；全局只为第三方库兜底，设置权归 `pkg/telemetry`，见 `go-style.md` 的红线例外。
+- 指标命名受 OTel 约束：必须 ASCII 字母开头，中文会被 SDK 当场拒绝（`invalid instrument name`）。span 名无此限制。
 - 鉴权拦截器带按完整方法名（`info.FullMethod`）的放行清单：`grpc.health.v1.Health/*` 默认在列；`/healthz` 同理不做业务鉴权。
 - 元端点清单（宪法第一条例外的全集）：`GET /healthz`。新增须经用户批准并同步更新本清单。
 - 日志：`log/slog` 结构化输出。分级：Debug=开发排查细节；Info=正常业务里程碑（默认级）；Warn=可自愈异常或降级；Error=需人介入的失败。公共字段统一 `trace_id`、`service`、`method`。请求出入口日志由拦截器统一打，业务代码不重复打「进入 / 退出」。
@@ -96,7 +103,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 优雅退出：编排唯一实现在 `pkg/app`。cmd 用 `signal.NotifyContext` 监听 SIGINT/SIGTERM 造出根 ctx 传给 `app.Run(ctx)`；app 只对 ctx 取消做反应，不监听信号、不自造根 ctx。
 - 组件契约：`Start(ctx)` 阻塞运行常驻循环（`return srv.Serve(ln)` 即可，不必自起 goroutine、不必自建错误上报 channel），`Stop(ctx)` 让它停下；无常驻循环的资源型组件（data、gateway 环回 ClientConn）`Start` 直接返回 nil。监听端口在装配期建好（cmd 里 `net.Listen`，起不来当场 panic），不放进 `Start`——app 按注册顺序拉起，但不判断也不等待就绪。
 - 组件无需过滤 `http.ErrServerClosed` / `grpc.ErrServerStopped`：只有 app 知道停机是不是它自己发起的，故停机期收到的 `Start` 返回值一律按预期处理，只有非停机期的非 nil 返回才算致命错误。这条不能反过来压给组件——没有信息的一方判断不了。
-- 停机顺序：注册顺序即拉起顺序、其逆序即停止顺序。约定按 `data → gRPC → gateway 环回 ClientConn → HTTP` 注册，于是停机为「停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC → 关闭 data 资源」。`pkg/app` 收的是变长组件切片、不校验顺序，写反了编译期与运行期都不报错，仍须 cmd 遵守本约定。
+- 停机顺序：注册顺序即拉起顺序、其逆序即停止顺序。约定按 `telemetry → data → gRPC → gateway 环回 ClientConn → HTTP` 注册，于是停机为「停 HTTP → 关 gateway 环回 ClientConn → `GracefulStop` gRPC → 关闭 data 资源 → 最后关 telemetry」。telemetry 排最前（= 最后停）是有意的：前面所有组件停机期间产生的 span 与 metric 都还能被记录，并在最后一步 flush 出去；反过来注册的话，停机过程本身就是黑的，而那恰恰是最需要看清楚的时候。`pkg/app` 收的是变长组件切片、不校验顺序，写反了编译期与运行期都不报错，仍须 cmd 遵守本约定。
 - 停机总超时由全部组件共享（非每组件），默认 30s 经配置可调，对齐 K8s `terminationGracePeriodSeconds` 的默认值；**该值必须小于部署侧给进程的宽限期，且要留余量**——两者取等意味着停机刚跑满，收尾日志与进程退出还没做完就被 SIGKILL，所以 Deployment 那边应配成比它大几秒（如 40s）。某组件 `Stop` 在宽限期内没返回，app 放弃等待、继续停下一个（被放弃的 `Stop` goroutine 就此漏下，进程正在退出，代价可接受）；剩余组件仍会被调用 `Stop`，只是拿到已过期的 ctx，应立即强制终止（gRPC 即 `GracefulStop` 转 `Stop()`）。跳过等于资源不释放。
 - 组件意外退出（非停机期 `Start` 返回非 nil，如监听器被意外关闭）触发同一套停机流程，并由 `Run` 返回该错误；cmd 据此以非零码退出（`if err := app.Run(ctx); err != nil { os.Exit(1) }`），避免「端口已死、进程还活着」。
 - Component 适配器归属：由组件所属层自行导出——`server` 出传输组件（gRPC、HTTP、gateway 环回 ClientConn），`data` 出资源组件（连接池等），cmd 只负责按顺序注册；适配器可 import `pkg/app`。

@@ -10,6 +10,7 @@
 - gofmt + goimports 无 diff 才能提交（`make lint` 强制）。
 - 禁止用 `panic` 做业务控制流；panic 只允许出现在 main 装配期「起不来就死」的场景，运行期由 recovery 拦截器兜底。
 - 禁止包级可变状态（`init()` 注册、全局单例）；一切依赖显式经构造函数传入。
+  - **唯一例外（OTel 全局 provider）**：`otel.SetTracerProvider` / `SetMeterProvider` / `SetTextMapPropagator` 只允许由 `pkg/telemetry` 在构造时设置一次，其他任何位置（含 cmd、`internal/**`、`pkg/` 其他包）禁止调用 `otel.Set*`。理由：otelsql、otelredis 等第三方埋点库以及库内部的 `otel.Tracer(...)` 只能经全局拿到 provider，不设全局它们会**静默**退化为 noop——不报错、不告警，只是 trace 里少了一整段。责任集中在一处，使用方忘不掉，也便于审计。我们自己的埋点仍须显式注入（`otelgrpc.WithTracerProvider(tel.TracerProvider())` 等），不依赖全局。
 
 ## 命名
 

@@ -27,17 +27,18 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ```
 .
 ├── .agent/                   # AI 规范文档层：架构 / 编码规范 / 工程规范
-├── api/                      # 协议层（对外事实源）
+├── api/                      # 协议层（对外事实源）；**只放 .proto**，不放任何生成物
 │   └── {service}/v1/         # 按服务 + 版本分目录
-│       ├── {service}.proto   # 含 google.api.http 注解与 protovalidate 校验注解
-│       └── *.pb.go 等        # 生成物，随 proto 同提交，禁手改
+│       └── {service}.proto   # 含 google.api.http 注解与 protovalidate 校验注解
+├── gen/                      # Go 生成物（pb / grpc / gateway），随 proto 同提交，禁手改
+│   └── {service}/v1/*.go     # import 路径即 gen/{service}/v1，包名 {service}v1
 ├── buf.yaml                  # buf 模块与 lint / breaking 配置
 ├── buf.lock                  # proto 依赖锁定，由 make proto-deps 生成，随源提交
 ├── buf.gen.yaml              # 生成插件配置
 ├── sqlc.yaml                 # data 层 SQL 访问代码的生成配置
 ├── Makefile                  # 命令契约唯一载体（定义见 engineering.md）
 ├── .golangci.yml             # 静态检查配置（含 generated 排除，见 go-style.md 适用范围）
-├── .gitignore                # 忽略 bin/ 与 .claude/（settings.json 除外，报告与备份不入库）
+├── .gitignore                # 忽略 bin/、tools/ 与 .claude/（settings.json 除外，报告与备份不入库）
 ├── go.mod / go.sum           # 单一 module，多服务共用
 ├── cmd/{service}/            # main：读配置、造根 ctx、构造组件并注入，交由 pkg/app 编排启停
 ├── configs/{service}.yaml    # 每服务一份配置，经 pkg/conf.MustLoad 绑定到结构体
@@ -60,8 +61,12 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │   ├── mysql/                # MySQL 连接池：MustNew(ctx, Config) 出内嵌 *sql.DB 的 Client
 │   ├── postgres/             # PostgreSQL 连接池：同上，走 pgx/v5/stdlib
 │   └── redis/                # Redis 连接池：MustNew(ctx, Config) 出内嵌 *goredis.Client 的 Client
-├── openapi/                  # 生成的 OpenAPI 文档，禁手改
-└── bin/                      # make build 产物，不入库
+├── openapi/                  # OpenAPI 3.1 文档
+│   ├── {service}/v1/*.json   # 生成物，禁手改
+│   └── openapi.go            # 手写：把上面的文档 //go:embed 进二进制，供服务对外提供
+├── bin/                      # make build 出的服务二进制（可直接拷进镜像），不入库
+└── tools/                    # 钉版本的工具链与缓存资源（buf、golangci-lint、阅读器 js 等），不入库
+    └── docs/                 # make docs 生成的离线接口文档页
 ```
 
 ## 依赖方向（红线）
@@ -71,15 +76,15 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 | 层 | 可以 import | 不可以 import |
 |---|---|---|
 | cmd | 本服务 server、service、biz、data（仅装配期构造与注入） | 其他服务的任何层 |
-| server | 本服务 service、本服务 api(pb) | biz、data |
-| service | 本服务 api(pb)、本服务 biz | data |
-| biz | 本服务内不 import 任何其他层 | api(pb)、service、data、任何存储驱动 |
+| server | 本服务 service、本服务 pb（`gen/`） | biz、data |
+| service | 本服务 pb（`gen/`）、本服务 biz | data |
+| biz | 本服务内不 import 任何其他层 | pb（`gen/`）、service、data、任何存储驱动 |
 | data | 本服务 biz（为实现其接口）、下游服务的 api(pb 客户端桩) | service、server |
 
 要点：
 
 - 本表只约束服务内部层与层之间、以及跨服务的可见性；标准库与 `pkg/`（领域无关工具）对所有层开放，不必逐行列举。
-- pb 类型止步于 service 层，biz 只见领域类型；转换代码写在 service。
+- pb 类型止步于 service 层，biz 只见领域类型；转换代码写在 service。生成的 pb 包在 `gen/{service}/v1`，与 `api/` 下的 `.proto` 源分开放——`api/` 按宪法第一条是「对外事实源」，混进派生物会让这个定位名不副实。
 - biz 定义接口、data 实现（依赖倒置），装配在 cmd 用构造函数手工注入，不引 DI 框架。
 - data 层用一个**字段全部未导出**的 `Data` 结构持有本服务全部存储连接，由 cmd 在装配期以 `pkg/{mysql,postgres,redis}` 的内嵌句柄（`db.DB`、`rdb.Client`）构造；各 repository 一律只收 `*Data`，于是新增存储组件只需改 `Data` 与 cmd 两个文件，已有 repository 一个字都不用动。
   - 字段必须未导出：这是「biz 不得绕过仓储直接查库」这条红线的**编译期**保障，包外访问会直接得到 `cannot refer to unexported field`。改成导出字段（或跨层的 svcCtx）能再省一处改动，但等于把这条路重新打开，不划算。
@@ -93,6 +98,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 目录即版本：`api/{service}/v1/`；破坏性变更开 `v2/`，v1 按弃用周期维护。
 - 每个 RPC 必须写 `google.api.http` 注解——HTTP 路由在 proto 里就是文档。
 - 路由风格：资源名词复数 + 标准方法（`GET /v1/users/{id}`、`POST /v1/users`）；自定义动作用 `POST /v1/users/{id}:activate` 形式。
+- 接口文档由 `protoc-gen-openapiv3` 从 proto 生成 OpenAPI **3.1.0** 到 `openapi/`，禁手写。proto 上的注释会成为 `summary` / `description`，`google.rpc.Status` 作为 `default` 错误响应自动注入。已知缺口：protovalidate 的校验规则（`min_len`、`email` 等）**不会**出现在文档 schema 里——插件不读这个扩展，调用方据文档生成的客户端不会带上这些约束，只能到服务端才被 `InvalidArgument` 打回。补它要引新插件，走宪法第三条。
 - 错误模型：service 层把 biz 错误集中映射为 `google.golang.org/grpc/status`（codes + errdetails），gateway 自动转 HTTP 状态码；错误码映射表随 service 维护，只在这一处翻译。
 - 参数校验：proto 层用 protovalidate 注解声明，由 `pkg/transport` 的校验拦截器统一执行（排在链尾、最靠近 handler，鉴权等自有拦截器先跑）；service 只做注解表达不了的业务校验。校验失败返回 `InvalidArgument` 并把违规明细作为 errdetails 回给调用方——这类错误是调用方自己能修好的，说清哪个字段不对才有意义，与「未预期错误不泄露内部信息」不冲突（后者针对服务端自身故障）。
 - data 层的 SQL 访问代码由 sqlc 生成，**SQL 是事实源**，与 proto 同一套原则：SQL 写在 `internal/{service}/data/query/*.sql`，生成物落在 `internal/{service}/data/sqlc/`，禁手改，随源同提交。schema 直接指向 `migrations/{service}/`——迁移即 schema，不另维护一份，两者漂移的可能从根上消除（sqlc 自动忽略 `.down.sql`）。
@@ -112,8 +118,12 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - `pkg/telemetry` 是 `pkg/app` 的资源型组件（`Start` 直接返回 nil，`Stop` 逆序 Shutdown 并 flush），靠结构化接口自动满足 `app.Component`，**不 import `pkg/app`**。不 Shutdown 就会丢掉最后一批 span 与 metric，把它做成组件正是为了让 cmd 忘不掉这一步。
 - 埋点库须显式注入 provider（`otelgrpc.WithTracerProvider(tel.TracerProvider())`、`WithMeterProvider`、`WithPropagators`），不依赖全局；全局只为第三方库兜底，设置权归 `pkg/telemetry`，见 `go-style.md` 的红线例外。
 - 指标命名受 OTel 约束：必须 ASCII 字母开头，中文会被 SDK 当场拒绝（`invalid instrument name`）。span 名无此限制。
-- 鉴权拦截器带按完整方法名（`info.FullMethod`）的放行清单：`grpc.health.v1.Health/*` 默认在列；`/healthz` 同理不做业务鉴权。
-- 元端点清单（宪法第一条例外的全集）：`GET /healthz`。新增须经用户批准并同步更新本清单。
+- 鉴权拦截器带按完整方法名（`info.FullMethod`）的放行清单：`grpc.health.v1.Health/*` 默认在列；元端点（`/healthz`、`/openapi.json`、`/docs`）走 gateway mux 直连，压根不经 gRPC 拦截器链，因此天然不做业务鉴权——要保护它们只能靠不注册（`ServeDocs: false`）或网关层限制。
+- 元端点清单（宪法第一条例外的全集）：`GET /healthz`、`GET /openapi.json`、`GET /docs`。三者都不进 `openapi/` 文档、都不做业务鉴权。新增须经用户批准并同步更新本清单。
+- 接口文档端点由 `pkg/transport.Config.OpenAPI` 控制：传入文档字节即注册 `/openapi.json` 与 `/docs`，不传则两个端点**彻底不存在**（而不是存在但返回空）——生产环境通常应关掉，接口全貌不该对外暴露。文档在构建期由 proto 生成并经 `openapi` 包 `//go:embed` 进二进制，运行期不读磁盘，容器里不用额外挂文件。
+- `/docs` 只是一张带一个 `<script>` 的页面，把 `/openapi.json` 交给浏览器端的 Scalar 渲染，脚本走 CDN。阅读器单文件 3.8MB，打进二进制让每个服务都背着不划算；代价是无外网时 `/docs` 打不开。
+- 阅读器版本的唯一事实源是 `pkg/transport/http.go` 的 `scalarVersion` 常量，Makefile 用 `sed` 读它下载同版本的离线包——本地看到的与服务端渲染的必须是同一个东西。CDN 裸 URL 会被解析到 `@latest`，等于没钉版本，已由 `TestDocsPagePinsReaderVersion` 锁住。
+- 无外网、或不想为看文档拉起整个服务（`user` 连不上 MySQL 就 panic）时用 `make docs SERVICE=<name>`：把 spec 内联进一张 HTML、配一份本地缓存的阅读器，`file://` 直接打开，零外网请求（`withDefaultFonts=false` 关掉 Scalar 的在线字体）。产物在 `tools/docs/`，不入库，与服务端 `/docs` 互补而非替代。
 - 日志：`log/slog` 结构化输出。分级：Debug=开发排查细节；Info=正常业务里程碑（默认级）；Warn=可自愈异常或降级；Error=需人介入的失败。公共字段统一 `trace_id`、`service`、`method`。请求出入口日志由拦截器统一打，业务代码不重复打「进入 / 退出」。
 - Logger 构造唯一入口 `pkg/log.MustNew(Config)`：`service` 由 Config 必填项写入每条日志；格式（json 默认 / text）、级别、是否带调用点均经配置可调。服务配置结构体里的字段直接写 `slog.Level` 与 `log.Format`，二者都实现了 `encoding.TextUnmarshaler`，YAML 写 `level: info`（大小写不敏感，还支持 `info+2` 偏移）、`format: json` 即可绑定，拼错在 `conf.MustLoad` 阶段就报错，不必等到 `MustNew`。`Config.Level` 收的是 `slog.Leveler`（`slog.Level` 天然满足），要运行期调级则由调用方自持 `*slog.LevelVar` 传入，`pkg/log` 不代管该变量、也不提供调级端点（加端点须先扩元端点清单）。构造出的 Logger 由 cmd 注入各组件与 `pkg/app.Config.Logger`；本包不调 `slog.SetDefault`，是否接管全局由 cmd 决定。
 - 随请求变化的字段（`trace_id`、`user_id` 等）经 `pkg/log.Extractor`（`func(ctx) []slog.Attr`）注入，在 cmd 装配期注册。因此 `pkg/log` 不依赖 OpenTelemetry：接 OTel 那轮在 `server` 层写一个读 `trace.SpanContextFromContext` 的 Extractor 注册进去即可，`pkg/log` 一行不改。Extractor 契约：不 panic、不阻塞、不在内部再打日志（会无限递归）；Handler 不做防御性 recover——它跑在日志热路径上且是装配期自己写的代码，出问题应当场暴露而非静默丢字段。

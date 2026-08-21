@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -428,5 +429,54 @@ func TestShutdownOrderKeepsInflightHTTPAlive(t *testing.T) {
 	got := <-done
 	if got.code != http.StatusOK || got.body != "SERVING" {
 		t.Errorf("停机期间在途的 HTTP 请求应正常完成, got %d %q", got.code, got.body)
+	}
+}
+
+func TestOpenAPIEndpoints(t *testing.T) {
+	spec := []byte(`{"openapi":"3.1.0","info":{"title":"user"}}`)
+	tp := newTransport(t, transport.Config{OpenAPI: spec})
+	defer runTransport(t, tp)()
+
+	code, body := httpGet(t, "http://"+tp.HTTPAddr()+"/openapi.json")
+	if code != http.StatusOK {
+		t.Fatalf("GET /openapi.json 状态码 got %d, want 200", code)
+	}
+	if body != string(spec) {
+		t.Errorf("返回的文档与传入的不一致\ngot:  %s\nwant: %s", body, spec)
+	}
+
+	code, body = httpGet(t, "http://"+tp.HTTPAddr()+"/docs")
+	if code != http.StatusOK {
+		t.Fatalf("GET /docs 状态码 got %d, want 200", code)
+	}
+	if !strings.Contains(body, "/openapi.json") {
+		t.Errorf("/docs 页面应指向 /openapi.json, got:\n%s", body)
+	}
+}
+
+// 阅读器脚本必须钉版本：裸 URL 会被 CDN 解析到 @latest，Scalar 发新版就跟着变，
+// 且与 make docs 本地缓存的那份对不上。此处只校验「钉了版本」，不校验具体版本号。
+func TestDocsPagePinsReaderVersion(t *testing.T) {
+	tp := newTransport(t, transport.Config{OpenAPI: []byte(`{"openapi":"3.1.0"}`)})
+	defer runTransport(t, tp)()
+
+	_, body := httpGet(t, "http://"+tp.HTTPAddr()+"/docs")
+
+	pinned := regexp.MustCompile(`@scalar/api-reference@\d+\.\d+\.\d+/`)
+	if !pinned.MatchString(body) {
+		t.Errorf("/docs 的阅读器脚本未钉版本, got:\n%s", body)
+	}
+}
+
+func TestOpenAPIEndpointsAbsentWhenNotConfigured(t *testing.T) {
+	// 不传 OpenAPI 就完全不注册这两个端点——生产环境通常不该把接口全貌暴露出去，
+	// 「关闭」必须是彻底不存在，而不是存在但返回空。
+	tp := newTransport(t, transport.Config{})
+	defer runTransport(t, tp)()
+
+	for _, path := range []string{"/openapi.json", "/docs"} {
+		if code, _ := httpGet(t, "http://"+tp.HTTPAddr()+path); code != http.StatusNotFound {
+			t.Errorf("未配置时 GET %s 应为 404, got %d", path, code)
+		}
 	}
 }

@@ -4,6 +4,9 @@
 server:
   grpc_addr: ":9090"
   http_addr: ":8080"
+  # 对外提供接口文档：GET /openapi.json（原始文档）与 GET /docs（浏览器阅读页）。
+  # 生产环境应设为 false——接口全貌不该对外暴露。
+  serve_docs: true
 
 log:
   # debug / info / warn / error，大小写不敏感，还支持 info+2 这类偏移

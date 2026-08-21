@@ -1,0 +1,185 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "user",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/users": {
+      "post": {
+        "tags": [
+          "UserService"
+        ],
+        "summary": "CreateUser 创建用户。",
+        "operationId": "UserService_CreateUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "description": "email 邮箱，须为合法邮箱格式。"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "name 用户名，1~32 字符。"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/google.rpc.Status"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "CreateUserResponse 创建用户的出参。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/user.v1.CreateUserResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users/{id}": {
+      "get": {
+        "tags": [
+          "UserService"
+        ],
+        "summary": "GetUser 按 ID 取用户。",
+        "operationId": "UserService_GetUser",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id 用户 ID，须为正数。",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/google.rpc.Status"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "GetUserResponse 取用户的出参。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/user.v1.GetUserResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "google.rpc.Status": {
+        "type": "object",
+        "description": "The Status type defines a logical error model suitable for different programming environments.",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The status code, which should be an enum value of google.rpc.Code."
+          },
+          "details": {
+            "type": "array",
+            "description": "A list of messages that carry the error details.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "@type": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "message": {
+            "type": "string",
+            "description": "A developer-facing error message."
+          }
+        }
+      },
+      "user.v1.CreateUserResponse": {
+        "type": "object",
+        "description": "CreateUserResponse 创建用户的出参。",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/user.v1.User",
+            "description": "user 新建成功的用户。"
+          }
+        }
+      },
+      "user.v1.GetUserResponse": {
+        "type": "object",
+        "description": "GetUserResponse 取用户的出参。",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/user.v1.User",
+            "description": "user 查到的用户。"
+          }
+        }
+      },
+      "user.v1.User": {
+        "type": "object",
+        "description": "User 用户。",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "created_at 创建时间。"
+          },
+          "email": {
+            "type": "string",
+            "description": "email 邮箱。"
+          },
+          "id": {
+            "type": "string",
+            "format": "int64",
+            "description": "id 用户 ID，创建时由服务端分配。"
+          },
+          "name": {
+            "type": "string",
+            "description": "name 用户名。"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "UserService",
+      "description": "UserService 用户服务。HTTP 路由由 google.api.http 注解声明，接口文档由本文件生成。"
+    }
+  ]
+}

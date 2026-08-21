@@ -45,6 +45,10 @@ type Config struct {
 	Interceptors []grpc.UnaryServerInterceptor
 	// Telemetry 可观测性提供方，nil 时完全不挂 StatsHandler（零开销）。
 	Telemetry Telemetry
+	// OpenAPI 本服务的 OpenAPI 文档（JSON），通常取自 openapi.MustSpec。
+	// 非 nil 时注册 GET /openapi.json 与 GET /docs 两个元端点；nil 则两者都不存在。
+	// 生产环境通常不该把接口全貌对外暴露，「关闭」就是不传这个字段。
+	OpenAPI []byte
 	// Logger 传输层日志，nil 时用 slog.Default()。
 	Logger *slog.Logger
 }
@@ -80,7 +84,7 @@ func MustNew(ctx context.Context, cfg Config) *Transport {
 	grpcLn := mustListen(cfg.GRPCAddr, "gRPC")
 	httpLn := mustListen(cfg.HTTPAddr, "HTTP")
 
-	mux := newGatewayMux()
+	mux := newGatewayMux(cfg)
 	loopback := mustLoopbackConn(cfg, grpcLn)
 	for _, register := range cfg.RegisterGateway {
 		if err := register(ctx, mux, loopback.conn); err != nil {

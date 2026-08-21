@@ -14,7 +14,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	userv1 "github.com/yanking/go-skeleton/api/user/v1"
+	userv1 "github.com/yanking/go-skeleton/gen/user/v1"
 	"github.com/yanking/go-skeleton/internal/user/biz"
 	"github.com/yanking/go-skeleton/internal/user/service"
 )

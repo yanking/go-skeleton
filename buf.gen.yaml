@@ -1,16 +1,19 @@
 # 生成插件配置。protoc 插件由 go.mod 的 tool 指令钉版本，经 go tool 调用，
 # 保证所有开发者与 CI 用同一版本；生成物随 proto 同提交（宪法第七条）。
+#
+# 源与生成物分开放：api/ 只放 .proto（宪法第一条的「对外事实源」），
+# Go 生成物落 gen/、接口文档落 openapi/，两者都禁手改。
 version: v2
 plugins:
   - local: ["go", "tool", "protoc-gen-go"]
-    out: api
+    out: gen
     opt: paths=source_relative
   - local: ["go", "tool", "protoc-gen-go-grpc"]
-    out: api
+    out: gen
     opt: paths=source_relative
   - local: ["go", "tool", "protoc-gen-grpc-gateway"]
-    out: api
+    out: gen
     opt: paths=source_relative
   # OpenAPI 即接口文档，禁止另行手写；每服务一份。
-  - local: ["go", "tool", "protoc-gen-openapiv2"]
+  - local: ["go", "tool", "protoc-gen-openapiv3"]
     out: openapi

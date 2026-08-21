@@ -51,15 +51,18 @@ func (m *memRepo) Get(_ context.Context, id int64) (*biz.User, error) {
 }
 
 // run 起一整套传输层（双端口 ＋ 环回 ＋ 拦截器链），返回 HTTP 基址与停机函数。
-func run(t *testing.T) (string, func()) {
+func run(t *testing.T) (string, func()) { return runWith(t, false) }
+
+func runWith(t *testing.T, serveDocs bool) (string, func()) {
 	t.Helper()
 	logger := discardLogger()
 	uc := biz.NewUserUsecase(newMemRepo(), logger)
 	svc := service.NewUserService(uc, logger)
 
 	tp := server.New(context.Background(), server.Config{
-		GRPCAddr: "127.0.0.1:0",
-		HTTPAddr: "127.0.0.1:0",
+		GRPCAddr:  "127.0.0.1:0",
+		HTTPAddr:  "127.0.0.1:0",
+		ServeDocs: serveDocs,
 	}, svc, nil, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,4 +139,48 @@ func TestNotFoundMapsTo404(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("查无此人应返回 404, got %d", resp.StatusCode)
 	}
+}
+
+func TestServeDocsExposesGeneratedSpec(t *testing.T) {
+	// 这条同时验证两件事：嵌入的文档能被读出来，且它确实是 proto 生成的那份
+	// （含本服务的真实路由），而不是随便一段 JSON。
+	base, stop := runWith(t, true)
+	defer stop()
+
+	code, body := get(t, base+"/openapi.json")
+	if code != http.StatusOK {
+		t.Fatalf("GET /openapi.json 状态码 got %d, want 200", code)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("返回的不是合法 JSON: %v", err)
+	}
+	if doc["openapi"] != "3.1.0" {
+		t.Errorf("openapi 版本 got %v, want 3.1.0", doc["openapi"])
+	}
+	paths, _ := doc["paths"].(map[string]any)
+	if _, ok := paths["/v1/users"]; !ok {
+		t.Errorf("文档里应含本服务的路由 /v1/users, got %v", paths)
+	}
+}
+
+func TestDocsDisabledByConfig(t *testing.T) {
+	base, stop := runWith(t, false)
+	defer stop()
+
+	if code, _ := get(t, base+"/openapi.json"); code != http.StatusNotFound {
+		t.Errorf("serve_docs=false 时应为 404, got %d", code)
+	}
+}
+
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }

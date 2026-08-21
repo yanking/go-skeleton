@@ -7,38 +7,57 @@ BUF_VERSION           := v1.72.0
 GOLANGCI_LINT_VERSION := v2.13.1
 MIGRATE_VERSION       := v4.19.1
 SQLC_VERSION          := v1.31.1
+# 阅读器版本的唯一事实源是 pkg/transport/http.go 的 scalarVersion：本地离线页与服务端
+# /docs 必须渲染自同一版本，两处各写一份必然漂移。读不到时 make docs 会带提示失败。
+SCALAR_VERSION        := $(shell sed -n 's/^const scalarVersion = "\(.*\)"$$/\1/p' pkg/transport/http.go)
 
-BIN := $(CURDIR)/bin
+# bin/ 只放 make build 出来的服务二进制（能直接拷进镜像的东西）；
+# tools/ 放钉版本的工具链与缓存资源（纯本地开发产物）。两者都不入库。
+BIN   := $(CURDIR)/bin
+TOOLS := $(CURDIR)/tools
 # 版本号进文件名：改了版本号即换了目标路径，make 会自动重装，不会用着旧的还以为是新的。
-BUF     := $(BIN)/buf-$(BUF_VERSION)
-LINT    := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
-MIGRATE := $(BIN)/migrate-$(MIGRATE_VERSION)
-SQLC    := $(BIN)/sqlc-$(SQLC_VERSION)
+BUF     := $(TOOLS)/buf-$(BUF_VERSION)
+LINT    := $(TOOLS)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+MIGRATE := $(TOOLS)/migrate-$(MIGRATE_VERSION)
+SQLC    := $(TOOLS)/sqlc-$(SQLC_VERSION)
+SCALAR  := $(TOOLS)/scalar-$(SCALAR_VERSION).js
+
+# make docs 的输入与产物。API_VERSION 可覆盖：make docs SERVICE=user API_VERSION=v2
+API_VERSION ?= v1
+SPEC      = openapi/$(SERVICE)/$(API_VERSION)/$(SERVICE).openapi.json
+DOCS_DIR := $(TOOLS)/docs
+DOCS_PAGE = $(DOCS_DIR)/$(SERVICE)-$(API_VERSION).html
 
 $(BUF):
-	@mkdir -p $(BIN)
-	GOBIN=$(BIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
-	@mv $(BIN)/buf $@
+	@mkdir -p $(TOOLS)
+	GOBIN=$(TOOLS) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+	@mv $(TOOLS)/buf $@
 
 $(LINT):
-	@mkdir -p $(BIN)
-	GOBIN=$(BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
-	@mv $(BIN)/golangci-lint $@
+	@mkdir -p $(TOOLS)
+	GOBIN=$(TOOLS) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@mv $(TOOLS)/golangci-lint $@
 
 $(MIGRATE):
-	@mkdir -p $(BIN)
-	GOBIN=$(BIN) go install -tags 'mysql postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION)
-	@mv $(BIN)/migrate $@
+	@mkdir -p $(TOOLS)
+	GOBIN=$(TOOLS) go install -tags 'mysql postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION)
+	@mv $(TOOLS)/migrate $@
 
 $(SQLC):
-	@mkdir -p $(BIN)
-	GOBIN=$(BIN) go install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
-	@mv $(BIN)/sqlc $@
+	@mkdir -p $(TOOLS)
+	GOBIN=$(TOOLS) go install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+	@mv $(TOOLS)/sqlc $@
+
+# 接口文档阅读器：单文件 3.8MB，首次执行时下载并按版本缓存，之后完全离线。
+# 与 pkg/transport 的 /docs 用同一版本，本地看到的和服务端渲染的是同一个东西。
+$(SCALAR):
+	@mkdir -p $(TOOLS)
+	curl -fsSL -o $@ https://cdn.jsdelivr.net/npm/@scalar/api-reference@$(SCALAR_VERSION)/dist/browser/standalone.js
 
 ## init: 安装 / 校验钉死版本的工具链
 .PHONY: init
 init: $(BUF) $(LINT) $(MIGRATE) $(SQLC)
-	@echo "工具链就绪：$(BIN)"
+	@echo "工具链就绪：$(TOOLS)"
 
 ## proto-deps: 拉取 / 更新 buf.yaml 声明的 proto 依赖，产出 buf.lock
 .PHONY: proto-deps
@@ -76,6 +95,27 @@ build:
 .PHONY: run
 run: guard-SERVICE
 	go run ./cmd/$(SERVICE) -conf configs/$(SERVICE).yaml
+
+## docs: 生成可离线打开的接口文档页；不起服务、不连数据库
+.PHONY: docs
+docs: guard-SERVICE $(SCALAR)
+	@test -n "$(SCALAR_VERSION)" || { echo "读不到 pkg/transport/http.go 的 scalarVersion 常量"; exit 1; }
+	@test -f $(SPEC) || { echo "找不到 $(SPEC)，先跑 make api"; exit 1; }
+	@mkdir -p $(DOCS_DIR)
+	@cp -f $(SCALAR) $(DOCS_DIR)/
+	@{ \
+		echo '<!doctype html>'; \
+		echo '<html lang="zh"><head><meta charset="utf-8">'; \
+		echo '<title>$(SERVICE) $(API_VERSION) 接口文档</title></head><body>'; \
+		echo '<script id="api-reference" type="application/json"' \
+		     'data-configuration="{&quot;withDefaultFonts&quot;:false}">'; \
+		cat $(SPEC); \
+		echo '</script>'; \
+		echo '<script src="scalar-$(SCALAR_VERSION).js"></script>'; \
+		echo '</body></html>'; \
+	} > $(DOCS_PAGE)
+	@echo "接口文档已生成，用浏览器打开：file://$(DOCS_PAGE)"
+	@echo "（内联 spec ＋ 本地阅读器，零外网请求；withDefaultFonts 关掉的是 Scalar 的在线字体）"
 
 ## test: 单元测试；需要真实中间件的用例在未配 DSN 时自动跳过
 .PHONY: test

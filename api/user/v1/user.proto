@@ -6,7 +6,7 @@ import "buf/validate/validate.proto";
 import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/yanking/go-skeleton/api/user/v1;userv1";
+option go_package = "github.com/yanking/go-skeleton/gen/user/v1;userv1";
 
 // UserService 用户服务。HTTP 路由由 google.api.http 注解声明，接口文档由本文件生成。
 service UserService {

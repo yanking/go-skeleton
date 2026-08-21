@@ -6,9 +6,10 @@
 |---|---|---|
 | Go ≥ 1.24 | 语言与构建 | go.mod `go` 指令 |
 | buf | proto 的 lint / breaking / 生成统一入口 | Makefile 钉版本并提供安装目标 |
-| protoc-gen-go / go-grpc / grpc-gateway / openapiv2 | 代码与接口文档生成 | go.mod `tool` 指令钉死，经 `go tool` 调用 |
+| protoc-gen-go / go-grpc / grpc-gateway / openapiv3 | 代码与接口文档生成（OpenAPI 3.1） | go.mod `tool` 指令钉死，经 `go tool` 调用 |
 | protovalidate | 参数校验：`buf.yaml` 依赖 `buf.build/bufbuild/protovalidate`（注解），Go 侧 `buf.build/go/protovalidate`（拦截器执行；该模块自 v1.x 起已从 `github.com/bufbuild/protovalidate-go` 改名，旧路径 `go get` 会直接报 module path 不匹配） | go.mod 常规依赖钉死 |
 | sqlc | 由 SQL 生成类型安全的 data 层访问代码；schema 直接读 `migrations/{service}/` | Makefile 钉版本 |
+| Scalar（`@scalar/api-reference`） | 接口文档阅读器。服务端 `/docs` 从 CDN 取，`make docs` 下载同版本单文件到 `tools/` 供离线用 | 版本唯一事实源是 `pkg/transport/http.go` 的 `scalarVersion`，Makefile 读它；非 Go 生态，升级须手动盯 release |
 | go-sql-driver/mysql ＋ jackc/pgx | 数据库驱动，经 `pkg/mysql`／`pkg/postgres` 统一装配，出口均为 `*sql.DB` | go.mod 常规依赖钉死 |
 | redis/go-redis | Redis 客户端，经 `pkg/redis` 装配 | go.mod 常规依赖钉死 |
 | XSAM/otelsql ＋ redisotel | 存储埋点。`redisotel` 是 go-redis 官方出品；`otelsql` 是社区库（OTel 无官方 `database/sql` 埋点），用得广但非官方背书 | go.mod 常规依赖钉死；`semconv` 版本须与 otelsql 内部一致 |
@@ -25,13 +26,14 @@
 
 | 目标 | 语义 |
 |---|---|
-| `make init` | 安装钉死版本的工具链到 `bin/`（buf / golangci-lint / golang-migrate）。二进制名带版本号（`bin/buf-v1.72.0`），改了 Makefile 里的版本号即换目标路径，make 自动重装 |
+| `make init` | 安装钉死版本的工具链到 `tools/`（buf / golangci-lint / golang-migrate / sqlc）。二进制名带版本号（`tools/buf-v1.72.0`），改了 Makefile 里的版本号即换目标路径，make 自动重装。`bin/` 只放 `make build` 出的服务二进制，两者不混 |
 | `make proto-deps` | `buf dep update`，拉取 / 更新 `buf.yaml` 声明的 proto 依赖并写 `buf.lock` |
-| `make api` | `buf lint` → `buf generate`（产出 pb、gateway、`openapi/`） |
+| `make api` | `buf lint` → `buf generate`（Go 生成物落 `gen/`，接口文档落 `openapi/`） |
 | `make breaking` | `buf breaking --against '.git#branch=main'`。前提：git 仓且 main 基线可解析；尚无基线的首次落库轮次跳过并在提交说明注明（宪法第六条例外） |
 | `make sql` | `sqlc vet` → `sqlc generate`（产出 `internal/{service}/data/sqlc/`） |
-| `make build` | 编译全部 `cmd/*` 到 `bin/`；`cmd/` 为空时跳过并提示（首个服务落地前的过渡状态） |
+| `make build` | 编译全部 `cmd/*` 到 `bin/`（只放服务二进制）；`cmd/` 为空时跳过并提示（首个服务落地前的过渡状态） |
 | `make run SERVICE=<name>` | 起指定服务，读 `configs/<name>.yaml`；SERVICE 必填 |
+| `make docs SERVICE=<name> [API_VERSION=v1]` | 生成可离线打开的接口文档页到 `tools/docs/<name>-<ver>.html`：spec 内联、阅读器取自 `tools/` 的本地缓存，`file://` 打开零外网请求。不起服务、不连数据库。首次执行需联网下载阅读器（3.8MB），之后离线可用 |
 | `make test` | `go test -race ./...`；需要真实数据库的用例在未配 DSN 时自动跳过 |
 | `make test-integration` | 带 `MYSQL_DSN` / `POSTGRES_DSN` 跑全量，用于本地验证存储包 |
 | `make lint` | `golangci-lint fmt --diff`（gofmt + goimports 检查，有 diff 即失败）＋ `golangci-lint run` |
@@ -96,7 +98,7 @@ POSTGRES_DSN='postgres://postgres:secret@127.0.0.1:55432/skeleton?sslmode=disabl
 
 1. 修改 `api/{service}/v{n}/*.proto`；新接口先想清 HTTP 注解、错误码与校验注解。
 2. 跑 `make api` 与 `make breaking`。lint 或 breaking 不过就地解决：确需破坏兼容时走宪法第六条（显式列明 + 用户确认 + 评估开新版本目录）。
-3. 生成物与 proto 同一提交（宪法第七条）；`openapi/` 即接口文档，禁止另行手写接口文档。
+3. 生成物与 proto 同一提交（宪法第七条）：Go 代码在 `gen/`、文档在 `openapi/`，两者都禁手改；`api/` 下只应有 `.proto`。
 
 ## 提交规范
 

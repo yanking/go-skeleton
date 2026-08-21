@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	userv1 "github.com/yanking/go-skeleton/api/user/v1"
+	userv1 "github.com/yanking/go-skeleton/gen/user/v1"
 	"github.com/yanking/go-skeleton/internal/user/biz"
 )
 

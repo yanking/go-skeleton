@@ -1,5 +1,7 @@
 # 构建产物（目录契约：不入库）
+# bin/ 是 make build 的服务二进制，tools/ 是钉版本的工具链与缓存资源
 /bin/
+/tools/
 
 # 本地会话产物：报告、备份等一律不入库（适配器 settings.json 除外）
 /.claude/*

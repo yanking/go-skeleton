@@ -22,7 +22,7 @@ linters:
   exclusions:
     generated: lax
     paths:
-      - api
+      - gen
       - openapi
 
 formatters:
@@ -32,5 +32,5 @@ formatters:
   exclusions:
     generated: lax
     paths:
-      - api
+      - gen
       - openapi

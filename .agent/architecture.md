@@ -32,6 +32,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │       ├── {service}.proto   # 含 google.api.http 注解与 protovalidate 校验注解
 │       └── *.pb.go 等        # 生成物，随 proto 同提交，禁手改
 ├── buf.yaml                  # buf 模块与 lint / breaking 配置
+├── buf.lock                  # proto 依赖锁定，由 make proto-deps 生成，随源提交
 ├── buf.gen.yaml              # 生成插件配置
 ├── Makefile                  # 命令契约唯一载体（定义见 engineering.md）
 ├── .golangci.yml             # 静态检查配置（含 generated 排除，见 go-style.md 适用范围）

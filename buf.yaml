@@ -1,0 +1,13 @@
+# buf 模块与 lint / breaking 配置。协议是对外事实源，生成物禁手改（宪法第一条）。
+version: v2
+modules:
+  - path: api
+deps:
+  - buf.build/googleapis/googleapis
+  - buf.build/bufbuild/protovalidate
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

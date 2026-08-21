@@ -18,20 +18,25 @@
 
 原则：所有开发者与 CI 使用同一钉死版本；任何「装个工具」的需求先进 Makefile 再进文档。
 
+钉版本的落地方式：Makefile 顶部的 `*_VERSION` 变量是唯一事实源，安装目标把二进制装成 `bin/<工具>-<版本>`。版本号进文件名意味着改版本即换 make 目标路径，会自动重装——不会出现「用着旧二进制却以为是新版本」。各目标依赖对应的二进制路径，缺了自动装，无需先手动 `make init`。
+
 ## 命令契约（Makefile）
 
 | 目标 | 语义 |
 |---|---|
-| `make init` | 安装 / 校验钉死版本的工具链 |
+| `make init` | 安装钉死版本的工具链到 `bin/`（buf / golangci-lint / golang-migrate）。二进制名带版本号（`bin/buf-v1.72.0`），改了 Makefile 里的版本号即换目标路径，make 自动重装 |
+| `make proto-deps` | `buf dep update`，拉取 / 更新 `buf.yaml` 声明的 proto 依赖并写 `buf.lock` |
 | `make api` | `buf lint` → `buf generate`（产出 pb、gateway、`openapi/`） |
 | `make breaking` | `buf breaking --against '.git#branch=main'`。前提：git 仓且 main 基线可解析；尚无基线的首次落库轮次跳过并在提交说明注明（宪法第六条例外） |
-| `make build` | 编译全部 `cmd/*` 到 `bin/` |
+| `make build` | 编译全部 `cmd/*` 到 `bin/`；`cmd/` 为空时跳过并提示（首个服务落地前的过渡状态） |
 | `make run SERVICE=<name>` | 起指定服务，读 `configs/<name>.yaml`；SERVICE 必填 |
 | `make test` | `go test -race ./...`；需要真实数据库的用例在未配 DSN 时自动跳过 |
 | `make test-integration` | 带 `MYSQL_DSN` / `POSTGRES_DSN` 跑全量，用于本地验证存储包 |
-| `make lint` | goimports 检查 + `golangci-lint run` |
-| `make migrate-up SERVICE=<name>` / `make migrate-down SERVICE=<name>` | 对指定服务执行 / 回滚 `migrations/<name>/` 迁移 |
-| `make all` | api → breaking → lint → test → build |
+| `make lint` | `golangci-lint fmt --diff`（gofmt + goimports 检查，有 diff 即失败）＋ `golangci-lint run` |
+| `make fmt` | `golangci-lint fmt`，就地格式化 |
+| `make migrate-up SERVICE=<name> DATABASE_URL=<url>` / `make migrate-down ...` | 对指定服务执行 / 回滚一步 `migrations/<name>/` 迁移；两个参数都必填，缺了会带用法提示直接失败 |
+| `make all` | api → breaking → lint → test → build；默认目标 |
+| `make help` | 列出全部目标 |
 
 单测单跑：`go test -race -run 'TestUserService_Create' ./internal/user/service/`
 
@@ -88,7 +93,7 @@ POSTGRES_DSN='postgres://postgres:secret@127.0.0.1:55432/skeleton?sslmode=disabl
 
 - Conventional Commits：`feat|fix|refactor|docs|test|chore(scope): 中文描述`；scope 用服务或模块名（如 `user`、`proto`、`makefile`）。
 - 提交前 `make lint && make test` 必须全绿（宪法第五条的落地点）。
-- Bootstrap 期例外（与 `make breaking` 同策略）：Makefile 尚未落地前，改跑 `gofmt -l . && go vet ./... && go test -race ./... && go build ./...`，并在提交说明注明所用命令与结果；Makefile 落地后本例外即失效。
+- ~~Bootstrap 期例外~~：Makefile 已落地，该例外自此失效，一律跑 `make lint && make test`。
 - 一次提交一件事；proto 变更（含生成物）与对应业务实现可同提交，但不得混入无关重构。
 
 ## CI 基线（落地时按此搭）

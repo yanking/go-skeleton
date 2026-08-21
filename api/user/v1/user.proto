@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package user.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/yanking/go-skeleton/api/user/v1;userv1";
+
+// UserService 用户服务。HTTP 路由由 google.api.http 注解声明，接口文档由本文件生成。
+service UserService {
+  // CreateUser 创建用户。
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse) {
+    option (google.api.http) = {
+      post: "/v1/users"
+      body: "*"
+    };
+  }
+
+  // GetUser 按 ID 取用户。
+  rpc GetUser(GetUserRequest) returns (GetUserResponse) {
+    option (google.api.http) = {get: "/v1/users/{id}"};
+  }
+}
+
+// User 用户。
+message User {
+  // id 用户 ID，创建时由服务端分配。
+  int64 id = 1;
+  // name 用户名。
+  string name = 2;
+  // email 邮箱。
+  string email = 3;
+  // created_at 创建时间。
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// CreateUserRequest 创建用户的入参。校验注解由拦截器统一执行，service 层不重复校验。
+message CreateUserRequest {
+  // name 用户名，1~32 字符。
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 32
+  }];
+  // email 邮箱，须为合法邮箱格式。
+  string email = 2 [(buf.validate.field).string.email = true];
+}
+
+// CreateUserResponse 创建用户的出参。
+message CreateUserResponse {
+  // user 新建成功的用户。
+  User user = 1;
+}
+
+// GetUserRequest 取用户的入参。
+message GetUserRequest {
+  // id 用户 ID，须为正数。
+  int64 id = 1 [(buf.validate.field).int64.gt = 0];
+}
+
+// GetUserResponse 取用户的出参。
+message GetUserResponse {
+  // user 查到的用户。
+  User user = 1;
+}

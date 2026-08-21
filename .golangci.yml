@@ -1,0 +1,36 @@
+# 静态检查配置。生成物不受手写代码规范约束（见 .agent/go-style.md「适用范围」）。
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - revive
+    - unconvert
+    - whitespace
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # QF1008 建议把 c.DB.Close() 简写成 c.Close()。这里刻意保留显式写法：
+        # Close 是内嵌句柄的提升方法，一旦将来给 Client 加了自己的 Close，
+        # 简写形式会变成无限递归，显式形式不会。
+        - -QF1008
+
+  exclusions:
+    generated: lax
+    paths:
+      - api
+      - openapi
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - api
+      - openapi

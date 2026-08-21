@@ -2,7 +2,7 @@
 
 面向所有 AI 编码代理的仓库入口指南。
 
-> **仓库状态**：代码落地进行中。规范与架构已定稿，`pkg/` 下 conf、app、log、telemetry、transport、mysql、postgres、redis 已落地；Makefile / buf 构建链与首个服务尚未落地，期间以下述文档为契约，发现文档与现实不符须当轮报告并修正其一（宪法第四条）。
+> **仓库状态**：代码落地进行中。规范与架构已定稿；`pkg/` 下 conf、app、log、telemetry、transport、mysql、postgres、redis 已落地；Makefile ＋ buf 构建链已落地，`api/user/v1` 首个协议与生成物已入库。尚缺 `internal/`、`cmd/`、`configs/`、`migrations/`——首个服务的四层实现与装配未落地。发现文档与现实不符须当轮报告并修正其一（宪法第四条）。
 
 ## 宪法（必读，最先加载）
 

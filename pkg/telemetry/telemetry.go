@@ -175,3 +175,23 @@ func (t *Telemetry) Stop(ctx context.Context) error {
 	}
 	return nil
 }
+
+// TraceAttrs 从 ctx 取出当前 span 的 trace_id 与 span_id，供 pkg/log.Extractor 使用：
+//
+//	log.MustNew(log.Config{..., Extractors: []log.Extractor{telemetry.TraceAttrs}})
+//
+// 无有效 span 时返回 nil，日志里就不会出现这两个字段——而不是一串全零，
+// 后者会让「这条日志属于哪条链路」这个问题得到一个看似有答案的错误答案。
+//
+// 它放在本包而非 pkg/log，是为了让 pkg/log 保持零第三方依赖：
+// 日志包不该因为「可能会接链路追踪」而钉上整棵 OTel 依赖树。
+func TraceAttrs(ctx context.Context) []slog.Attr {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return nil
+	}
+	return []slog.Attr{
+		slog.String("trace_id", sc.TraceID().String()),
+		slog.String("span_id", sc.SpanID().String()),
+	}
+}

@@ -6,12 +6,14 @@ SHELL := /bin/bash
 BUF_VERSION           := v1.72.0
 GOLANGCI_LINT_VERSION := v2.13.1
 MIGRATE_VERSION       := v4.19.1
+SQLC_VERSION          := v1.31.1
 
 BIN := $(CURDIR)/bin
 # 版本号进文件名：改了版本号即换了目标路径，make 会自动重装，不会用着旧的还以为是新的。
 BUF     := $(BIN)/buf-$(BUF_VERSION)
 LINT    := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 MIGRATE := $(BIN)/migrate-$(MIGRATE_VERSION)
+SQLC    := $(BIN)/sqlc-$(SQLC_VERSION)
 
 $(BUF):
 	@mkdir -p $(BIN)
@@ -28,9 +30,14 @@ $(MIGRATE):
 	GOBIN=$(BIN) go install -tags 'mysql postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION)
 	@mv $(BIN)/migrate $@
 
+$(SQLC):
+	@mkdir -p $(BIN)
+	GOBIN=$(BIN) go install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+	@mv $(BIN)/sqlc $@
+
 ## init: 安装 / 校验钉死版本的工具链
 .PHONY: init
-init: $(BUF) $(LINT) $(MIGRATE)
+init: $(BUF) $(LINT) $(MIGRATE) $(SQLC)
 	@echo "工具链就绪：$(BIN)"
 
 ## proto-deps: 拉取 / 更新 buf.yaml 声明的 proto 依赖，产出 buf.lock
@@ -48,6 +55,12 @@ api: $(BUF)
 .PHONY: breaking
 breaking: $(BUF)
 	$(BUF) breaking --against '.git#branch=main'
+
+## sql: 校验并重新生成 data 层的 SQL 访问代码（sqlc）
+.PHONY: sql
+sql: $(SQLC)
+	$(SQLC) vet
+	$(SQLC) generate
 
 ## build: 编译全部 cmd/* 到 bin/
 .PHONY: build
@@ -94,9 +107,9 @@ migrate-up: $(MIGRATE) guard-SERVICE guard-DATABASE_URL
 migrate-down: $(MIGRATE) guard-SERVICE guard-DATABASE_URL
 	$(MIGRATE) -path migrations/$(SERVICE) -database "$(DATABASE_URL)" down 1
 
-## all: api → breaking → lint → test → build
+## all: api → sql → breaking → lint → test → build
 .PHONY: all
-all: api breaking lint test build
+all: api sql breaking lint test build
 
 # guard-X：X 未设置就带着用法提示失败，而不是执行到一半才出错
 guard-%:

@@ -2,14 +2,17 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"runtime/debug"
 	"strings"
 	"time"
 
+	"buf.build/go/protovalidate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // recoveryInterceptor 把 handler 里的 panic 兜成 Internal 错误。
@@ -67,4 +70,37 @@ func levelOf(code codes.Code, fullMethod string) slog.Level {
 	default:
 		return slog.LevelWarn
 	}
+}
+
+// validateInterceptor 执行 proto 注解里声明的 protovalidate 校验规则。
+// 规则写在 .proto 上、由本拦截器统一执行，service 层只做注解表达不了的业务校验。
+// 它排在链尾（最靠近 handler）：鉴权等自有拦截器先跑，校验失败才不会浪费在未授权的请求上。
+func validateInterceptor(validator protovalidate.Validator) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		msg, ok := req.(proto.Message)
+		if !ok {
+			return handler(ctx, req)
+		}
+		if err := validator.Validate(msg); err != nil {
+			return nil, invalidArgument(err)
+		}
+		return handler(ctx, req)
+	}
+}
+
+// invalidArgument 把校验失败转成带 errdetails 的 InvalidArgument。
+// 违规明细回给调用方是有意的：这类错误是它自己能修好的，说清楚哪个字段不对才有意义。
+// 这与「未预期错误不泄露内部信息」不冲突——那条针对的是服务端自身的故障。
+func invalidArgument(err error) error {
+	st := status.New(codes.InvalidArgument, "参数校验失败")
+
+	var valErr *protovalidate.ValidationError
+	if !errors.As(err, &valErr) {
+		return st.Err()
+	}
+	detailed, detailErr := st.WithDetails(valErr.ToProto())
+	if detailErr != nil {
+		return st.Err()
+	}
+	return detailed.Err()
 }

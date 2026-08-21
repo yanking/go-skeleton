@@ -1,0 +1,34 @@
+# user 服务配置。多环境靠部署侧提供不同的配置文件，不在代码里搭环境变量映射层。
+# 本文件是本地开发默认值，DSN 对应 .agent/engineering.md「集成测试」里的容器。
+
+server:
+  grpc_addr: ":9090"
+  http_addr: ":8080"
+
+log:
+  # debug / info / warn / error，大小写不敏感，还支持 info+2 这类偏移
+  level: info
+  # json（生产）/ text（本地肉眼阅读）
+  format: json
+  add_source: false
+
+telemetry:
+  # none（默认，零开销）/ stdout（本地调试）/ otlp（发往 collector）
+  exporter: none
+  endpoint: "127.0.0.1:4317"
+  insecure: true
+  # 采样率 0~1，缺省即全采；要关闭遥测请用 exporter: none
+  sample_ratio: 1
+  env: local
+
+mysql:
+  dsn: "root:secret@tcp(127.0.0.1:53306)/skeleton?parseTime=true"
+  max_open_conns: 25
+  max_idle_conns: 25
+  # 须小于 MySQL 的 wait_timeout，否则会拿到已被服务端单方面关闭的连接
+  conn_max_lifetime: 30m
+  connect_timeout: 5s
+
+# 停机总超时（全部组件共享）。须小于部署侧给进程的宽限期并留余量：
+# K8s 的 terminationGracePeriodSeconds 默认也是 30s，应配成比本值大几秒（如 40s）。
+stop_timeout: 30s

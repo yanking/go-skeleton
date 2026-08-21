@@ -2,14 +2,26 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 
+	"buf.build/go/protovalidate"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
+
+// mustValidator 造 protovalidate 校验器。它要编译 proto 里的 CEL 表达式，
+// 编译不过说明注解写错了，属装配期错误，当场 panic。
+func mustValidator() protovalidate.Validator {
+	validator, err := protovalidate.New()
+	if err != nil {
+		panic(fmt.Errorf("装配 Transport: 构造参数校验器: %w", err))
+	}
+	return validator
+}
 
 // grpcServer 是 gRPC 服务端的 app.Component 适配器。
 type grpcServer struct {
@@ -28,6 +40,8 @@ func newGRPCServer(cfg Config, ln net.Listener, logger *slog.Logger) *grpcServer
 		loggingInterceptor(logger),
 		recoveryInterceptor(logger),
 	}, cfg.Interceptors...)
+	// 参数校验排在链尾，最靠近 handler——鉴权等自有拦截器先跑完再校验。
+	interceptors = append(interceptors, validateInterceptor(mustValidator()))
 
 	opts := []grpc.ServerOption{grpc.ChainUnaryInterceptor(interceptors...)}
 	// 观测不在拦截器链上：otelgrpc 是 stats.Handler，先于整条链触发，

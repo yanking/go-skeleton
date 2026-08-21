@@ -297,3 +297,32 @@ func TestOTLPExporterConstructsWithoutCollector(t *testing.T) {
 		t.Logf("无 collector 时 Stop 报错属预期: %v", err)
 	}
 }
+
+func TestTraceAttrs(t *testing.T) {
+	// TraceAttrs 是 pkg/log.Extractor 的实现，把当前 span 的 trace_id / span_id
+	// 打进每条日志——日志与链路靠这两个字段关联。
+	ctx := context.Background()
+	if got := telemetry.TraceAttrs(ctx); got != nil {
+		t.Errorf("无 span 时不该产生字段, got %v", got)
+	}
+
+	tel := telemetry.MustNew(ctx, telemetry.Config{
+		Service:  "user",
+		Exporter: telemetry.ExporterStdout,
+		Writer:   io.Discard,
+		Logger:   discardLogger(),
+	})
+	defer func() { _ = tel.Stop(ctx) }()
+
+	spanCtx, span := tel.TracerProvider().Tracer("测试埋点").Start(ctx, "某操作")
+	defer span.End()
+
+	got := telemetry.TraceAttrs(spanCtx)
+	want := []slog.Attr{
+		slog.String("trace_id", span.SpanContext().TraceID().String()),
+		slog.String("span_id", span.SpanContext().SpanID().String()),
+	}
+	if diff := cmp.Diff(want, got, cmp.Comparer(func(a, b slog.Attr) bool { return a.Equal(b) })); diff != "" {
+		t.Errorf("字段不符 (-want +got):\n%s", diff)
+	}
+}

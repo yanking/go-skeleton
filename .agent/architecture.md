@@ -34,6 +34,7 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 ├── buf.yaml                  # buf 模块与 lint / breaking 配置
 ├── buf.lock                  # proto 依赖锁定，由 make proto-deps 生成，随源提交
 ├── buf.gen.yaml              # 生成插件配置
+├── sqlc.yaml                 # data 层 SQL 访问代码的生成配置
 ├── Makefile                  # 命令契约唯一载体（定义见 engineering.md）
 ├── .golangci.yml             # 静态检查配置（含 generated 排除，见 go-style.md 适用范围）
 ├── .gitignore                # 忽略 bin/ 与 .claude/（settings.json 除外，报告与备份不入库）
@@ -48,6 +49,8 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 │       ├── service/          # 实现 pb 生成的 {Service}Server；出入参转换与映射错误码
 │       ├── biz/              # 领域逻辑；定义仓储接口；不感知传输与存储
 │       └── data/             # 实现 biz 的接口；连接收在未导出字段的 Data 结构里
+│           ├── query/        # 手写 SQL，sqlc 的输入
+│           └── sqlc/         # sqlc 生成物，禁手改
 ├── pkg/                      # 跨服务共享的领域无关工具（可被外部仓库引用；谨慎准入，禁止业务逻辑）
 │   ├── app/                  # 生命周期编排：Run(ctx) 按序拉起、逆序停止
 │   ├── conf/                 # 配置加载：MustLoad(configFile, obj)
@@ -91,7 +94,9 @@ grpc-gateway ── 环回 gRPC ──▶ gRPC Server ◀── StatsHandler 观
 - 每个 RPC 必须写 `google.api.http` 注解——HTTP 路由在 proto 里就是文档。
 - 路由风格：资源名词复数 + 标准方法（`GET /v1/users/{id}`、`POST /v1/users`）；自定义动作用 `POST /v1/users/{id}:activate` 形式。
 - 错误模型：service 层把 biz 错误集中映射为 `google.golang.org/grpc/status`（codes + errdetails），gateway 自动转 HTTP 状态码；错误码映射表随 service 维护，只在这一处翻译。
-- 参数校验：proto 层用 protovalidate 注解声明，拦截器统一执行；service 只做注解表达不了的业务校验。
+- 参数校验：proto 层用 protovalidate 注解声明，由 `pkg/transport` 的校验拦截器统一执行（排在链尾、最靠近 handler，鉴权等自有拦截器先跑）；service 只做注解表达不了的业务校验。校验失败返回 `InvalidArgument` 并把违规明细作为 errdetails 回给调用方——这类错误是调用方自己能修好的，说清哪个字段不对才有意义，与「未预期错误不泄露内部信息」不冲突（后者针对服务端自身故障）。
+- data 层的 SQL 访问代码由 sqlc 生成，**SQL 是事实源**，与 proto 同一套原则：SQL 写在 `internal/{service}/data/query/*.sql`，生成物落在 `internal/{service}/data/sqlc/`，禁手改，随源同提交。schema 直接指向 `migrations/{service}/`——迁移即 schema，不另维护一份，两者漂移的可能从根上消除（sqlc 自动忽略 `.down.sql`）。
+- 存储层错误必须在 data 层就翻译成领域错误：`sql.ErrNoRows` → `biz.ErrUserNotFound`，MySQL 1062 唯一键冲突 → `biz.ErrEmailTaken`。判定用 `errors.Is` / `errors.As` 配驱动的错误类型（`*mysql.MySQLError`），不匹配错误字符串。驱动的错误码不得漏到 biz 或 service 去。
 - 健康检查由 `pkg/transport` 统一提供：gRPC Health v1 复用 grpc-go 官方 `grpc_health_v1`（不复制进 `api/`），整进程报一个总状态；HTTP 侧 `GET /healthz` 在 gateway mux 上以代码注册，只表示「进程活着」（liveness），「是否可接流量」（readiness）看 gRPC Health v1——此为宪法第一条的基础设施例外，不进 `openapi/`。
 
 ## 横切关注点

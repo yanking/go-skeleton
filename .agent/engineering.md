@@ -8,6 +8,7 @@
 | buf | proto 的 lint / breaking / 生成统一入口 | Makefile 钉版本并提供安装目标 |
 | protoc-gen-go / go-grpc / grpc-gateway / openapiv2 | 代码与接口文档生成 | go.mod `tool` 指令钉死，经 `go tool` 调用 |
 | protovalidate | 参数校验：`buf.yaml` 依赖 `buf.build/bufbuild/protovalidate`（注解），Go 侧 `buf.build/go/protovalidate`（拦截器执行；该模块自 v1.x 起已从 `github.com/bufbuild/protovalidate-go` 改名，旧路径 `go get` 会直接报 module path 不匹配） | go.mod 常规依赖钉死 |
+| sqlc | 由 SQL 生成类型安全的 data 层访问代码；schema 直接读 `migrations/{service}/` | Makefile 钉版本 |
 | go-sql-driver/mysql ＋ jackc/pgx | 数据库驱动，经 `pkg/mysql`／`pkg/postgres` 统一装配，出口均为 `*sql.DB` | go.mod 常规依赖钉死 |
 | redis/go-redis | Redis 客户端，经 `pkg/redis` 装配 | go.mod 常规依赖钉死 |
 | XSAM/otelsql ＋ redisotel | 存储埋点。`redisotel` 是 go-redis 官方出品；`otelsql` 是社区库（OTel 无官方 `database/sql` 埋点），用得广但非官方背书 | go.mod 常规依赖钉死；`semconv` 版本须与 otelsql 内部一致 |
@@ -28,6 +29,7 @@
 | `make proto-deps` | `buf dep update`，拉取 / 更新 `buf.yaml` 声明的 proto 依赖并写 `buf.lock` |
 | `make api` | `buf lint` → `buf generate`（产出 pb、gateway、`openapi/`） |
 | `make breaking` | `buf breaking --against '.git#branch=main'`。前提：git 仓且 main 基线可解析；尚无基线的首次落库轮次跳过并在提交说明注明（宪法第六条例外） |
+| `make sql` | `sqlc vet` → `sqlc generate`（产出 `internal/{service}/data/sqlc/`） |
 | `make build` | 编译全部 `cmd/*` 到 `bin/`；`cmd/` 为空时跳过并提示（首个服务落地前的过渡状态） |
 | `make run SERVICE=<name>` | 起指定服务，读 `configs/<name>.yaml`；SERVICE 必填 |
 | `make test` | `go test -race ./...`；需要真实数据库的用例在未配 DSN 时自动跳过 |
@@ -35,7 +37,7 @@
 | `make lint` | `golangci-lint fmt --diff`（gofmt + goimports 检查，有 diff 即失败）＋ `golangci-lint run` |
 | `make fmt` | `golangci-lint fmt`，就地格式化 |
 | `make migrate-up SERVICE=<name> DATABASE_URL=<url>` / `make migrate-down ...` | 对指定服务执行 / 回滚一步 `migrations/<name>/` 迁移；两个参数都必填，缺了会带用法提示直接失败 |
-| `make all` | api → breaking → lint → test → build；默认目标 |
+| `make all` | api → sql → breaking → lint → test → build；默认目标 |
 | `make help` | 列出全部目标 |
 
 单测单跑：`go test -race -run 'TestUserService_Create' ./internal/user/service/`
@@ -83,6 +85,13 @@ POSTGRES_DSN='postgres://postgres:secret@127.0.0.1:55432/skeleton?sslmode=disabl
 - 工具 golang-migrate；纯 SQL，放 `migrations/{service}/`，命名 `NNNN_描述.up.sql` / `NNNN_描述.down.sql`，up/down 必须成对。
 - 执行独立于服务启动（进程不自动跑迁移）：本地与部署流程显式执行 `make migrate-up SERVICE=x`；CI 不自动执行迁移。
 
+## SQL 工作流
+
+1. 改 `migrations/{service}/NNNN_描述.up.sql`（up/down 成对）——迁移即 schema，sqlc 直接读它，不另维护一份；
+2. 在 `internal/{service}/data/query/*.sql` 写查询，用 `-- name: Xxx :one|:many|:exec|:execresult` 标注；
+3. 跑 `make sql`。SQL 写错、字段不存在会在 `sqlc vet` / `generate` 阶段就报错，不必等到运行期；
+4. 生成物随 SQL 同提交，禁手改；仓储在 `data/*.go` 里调生成的 `Queries`，并把存储错误翻译成领域错误。
+
 ## Proto 工作流
 
 1. 修改 `api/{service}/v{n}/*.proto`；新接口先想清 HTTP 注解、错误码与校验注解。
@@ -102,7 +111,7 @@ POSTGRES_DSN='postgres://postgres:secret@127.0.0.1:55432/skeleton?sslmode=disabl
 
 PR 必过五关，顺序执行：
 
-1. `make api` 后 `git diff --exit-code`——校验已提交生成物与 proto 一致；
+1. `make api` 与 `make sql` 后 `git diff --exit-code`——校验已提交生成物与 proto / SQL 一致；
 2. `make breaking`；
 3. `make lint`；
 4. `make test`；

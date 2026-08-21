@@ -1,0 +1,13 @@
+# data 层 SQL 访问代码的生成配置。SQL 是事实源，生成物禁手改——与 proto 同一套原则。
+# schema 直接指向 golang-migrate 的迁移目录：迁移即 schema，不另维护一份，
+# 两者漂移的可能性从根上消除（sqlc 会自动忽略 .down.sql）。
+version: "2"
+sql:
+  - engine: "mysql"
+    schema: "migrations/user"
+    queries: "internal/user/data/query"
+    gen:
+      go:
+        package: "sqlc"
+        out: "internal/user/data/sqlc"
+        sql_package: "database/sql"

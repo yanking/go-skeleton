@@ -2,7 +2,7 @@
 
 面向所有 AI 编码代理的仓库入口指南。
 
-> **仓库状态**：代码落地进行中。规范与架构已定稿；`pkg/` 下 conf、app、log、telemetry、transport、mysql、postgres、redis 已落地；Makefile ＋ buf 构建链已落地，`api/user/v1` 首个协议与生成物已入库。尚缺 `internal/`、`cmd/`、`configs/`、`migrations/`——首个服务的四层实现与装配未落地。发现文档与现实不符须当轮报告并修正其一（宪法第四条）。
+> **仓库状态**：脚手架已跑通。`pkg/` 下 conf、app、log、telemetry、transport、mysql、postgres、redis 八个包；Makefile ＋ buf ＋ sqlc 构建链完整；首个服务 `user` 四层落地，双协议、参数校验、优雅停机与 `trace_id` 入日志均已实测。后续新建服务照 `.agent/engineering.md`「新建服务清单」走。发现文档与现实不符须当轮报告并修正其一（宪法第四条）。
 
 ## 宪法（必读，最先加载）
 
@@ -24,6 +24,7 @@ Go 微服务开发脚手架，**多服务 monorepo**：`.proto` 是对外协议�
 | 新增/修改 `.proto`、接口与错误设计 | `.agent/architecture.md`「协议层规则」＋`.agent/engineering.md`「Proto 工作流」 |
 | 写或改 Go 代码 | `.agent/go-style.md`＋`.agent/architecture.md`「依赖方向（红线）」 |
 | 新增模块、目录调整、跨层/跨服务调用 | `.agent/architecture.md` |
+| 新增/修改 SQL、迁移、仓储实现 | `.agent/engineering.md`「SQL 工作流」＋`.agent/architecture.md`「依赖方向（红线）」 |
 | 构建、生成、测试、lint、迁移、提交 | `.agent/engineering.md` |
 | 以上均不命中 | 停下，走宪法第三条向用户确认 |
 

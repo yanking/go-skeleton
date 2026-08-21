@@ -59,11 +59,11 @@
 - 每服务一份 `configs/{service}.yaml`；解析用 `gopkg.in/yaml.v3`，不引重型配置框架。
 - 加载唯一入口：`pkg/conf` 的 `MustLoad(configFile string, obj any)`——读文件并严格绑定到配置结构体（未知键报错），不做环境变量覆盖，配置以文件为准。
 - 校验必填项：配置结构体实现 `Validate() error`，`MustLoad` 绑定后自动调用，失败即 panic 退出（go-style 允许的装配期 panic 场景）。
-- 存储参数（DSN、连接池上下限、连接寿命、探活窗口）同样由服务自己的配置结构体承载，cmd 装配时填进 `pkg/mysql.Config`／`pkg/postgres.Config`／`pkg/redis.Config`。`ConnMaxLifetime` 须小于 MySQL 的 `wait_timeout`，否则会拿到已被服务端单方面关闭的连接。
-- 传输层参数（gRPC / HTTP 监听地址）同样由服务自己的配置结构体承载，cmd 装配时填进 `pkg/transport.Config`。
-- 可观测性参数（导出方式、collector 地址、采样率）同样由服务自己的配置结构体承载，导出方式字段用 `telemetry.Exporter` 类型（YAML 直接写 `otlp`／`stdout`／`none`，拼错在 `conf.MustLoad` 阶段就报错），cmd 装配时填进 `pkg/telemetry.Config`。
-- 日志参数（级别、格式、是否带调用点）同样由服务自己的配置结构体承载，级别字段用 `slog.Level` 类型（YAML 直接写 `debug`／`info`／`warn`／`error`），cmd 装配时填进 `pkg/log.Config` 并 `MustNew` 出 Logger 注入各组件。
-- 运行参数（如停机总超时）由服务自己的配置结构体承载，cmd 装配时把加载好的值显式填进 `pkg/app.Config`——`pkg/app` 只认 Go 结构体，不碰 YAML；字段名不强制统一，但须在该服务的 `configs/{service}.yaml` 里注释说明。
+- **服务配置结构体直接嵌 pkg 的 Config，不抄副本**：`cmd/{service}/config.go` 里写 `MySQL mysql.Config \`yaml:"mysql"\``，而不是另定义一个字段一样的 `mysqlConfig`。副本的代价是真实发生过的——曾经的副本漏掉 `mysql.Config.ConnMaxIdleTime`，那个连接池旋钮从配置文件根本配不到，编译、lint、测试全部沉默。每加一个参数要在两处同步，漏一次就静默失效。
+- pkg 的 `Config` 因此分两类字段：标 yaml 键的是**声明式参数**（DSN、监听地址、级别、采样率），由 `conf.MustLoad` 绑定；标 `yaml:"-"` 的是**装配期注入项**（`Logger`、`Telemetry`、`Writer`、`Extractors`、`Service`、`Version`），配置文件里没有也不该有，由 cmd 在绑定之后填，然后整个 Config 交给 `MustNew`。漏标 `yaml:"-"` 不会有任何提示（yaml 会把字段名小写化当成合法键），故由 `cmd/{service}/config_test.go` 的 `TestInjectedFieldsAreTaggedNotBindable` 按类型扫全部 pkg Config 兜底。
+- 枚举型字段用各 pkg 自己的类型（`telemetry.Exporter`、`log.Format`、`slog.Level`），它们都实现了 `encoding.TextUnmarshaler`，YAML 里直接写 `otlp`／`json`／`info`，拼错在 `conf.MustLoad` 阶段就报错，不必等到构造。因此 pkg 的 Config 字段不用接口类型——接口绑不进 YAML（`log.Config.Level` 用 `slog.Level` 而非 `slog.Leveler` 正是为此）。
+- `ConnMaxLifetime` 须小于 MySQL 的 `wait_timeout`，否则会拿到已被服务端单方面关闭的连接。
+- 运行参数（如停机总超时）留在服务配置结构体的顶层，cmd 装配时填进 `pkg/app.Config`——`pkg/app` 只认 Go 结构体，不碰 YAML。
 - 多环境：部署侧提供不同的配置文件（挂载或以启动参数指定路径），不在代码里搭环境变量映射层。
 
 ## 集成测试

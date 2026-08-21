@@ -28,19 +28,19 @@ type Telemetry interface {
 // Config Redis 连接参数。
 type Config struct {
 	// Addr 服务地址 host:port；必填。
-	Addr string
+	Addr string `yaml:"addr"`
 	// Password 访问密码，无密码留空。
-	Password string
+	Password string `yaml:"password"`
 	// DB 库号，零值即 0 号库。
-	DB int
+	DB int `yaml:"db"`
 	// PoolSize 连接池大小，零值取 go-redis 默认（10 × GOMAXPROCS）。
-	PoolSize int
+	PoolSize int `yaml:"pool_size"`
 	// ConnectTimeout 装配期探活的重试窗口，零值取 5s。见 MustNew 的说明。
-	ConnectTimeout time.Duration
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 	// Telemetry 可观测性提供方，nil 时完全不埋点（零开销）。
-	Telemetry Telemetry
+	Telemetry Telemetry `yaml:"-"`
 	// Logger 构造与停机日志，nil 时用 slog.Default()。
-	Logger *slog.Logger
+	Logger *slog.Logger `yaml:"-"`
 }
 
 // Client 是带生命周期的 Redis 客户端。内嵌 *goredis.Client，故 Get/Set 等命令可直接调用；

@@ -48,24 +48,24 @@ func (e *Exporter) UnmarshalText(text []byte) error {
 // Config 可观测性构造参数。
 type Config struct {
 	// Service 服务名，写入 resource 的 service.name；必填。
-	Service string
+	Service string `yaml:"-"`
 	// Exporter 导出方式，零值取 ExporterNone。
-	Exporter Exporter
+	Exporter Exporter `yaml:"exporter"`
 	// Endpoint Exporter 为 ExporterOTLP 时的 collector 地址，如 localhost:4317；此时必填。
-	Endpoint string
+	Endpoint string `yaml:"endpoint"`
 	// Insecure OTLP 是否走明文，集群内直连 collector 时通常为 true。
-	Insecure bool
+	Insecure bool `yaml:"insecure"`
 	// Version 服务版本，写入 resource 的 service.version；可空。
-	Version string
+	Version string `yaml:"-"`
 	// Env 部署环境，写入 resource 的 deployment.environment.name；可空。
-	Env string
+	Env string `yaml:"env"`
 	// SampleRatio 采样率，取值 0~1，零值取 1（全采）。
 	// 要关闭遥测请用 Exporter=none，不要把采样率设 0——关闭只有一个开关。
-	SampleRatio float64
+	SampleRatio float64 `yaml:"sample_ratio"`
 	// Writer Exporter 为 ExporterStdout 时的输出目标，nil 时用 os.Stdout。
-	Writer io.Writer
+	Writer io.Writer `yaml:"-"`
 	// Logger 构造与停机日志，nil 时用 slog.Default()。
-	Logger *slog.Logger
+	Logger *slog.Logger `yaml:"-"`
 }
 
 // Telemetry 持有 trace 与 metric 的 provider，并在停机时把缓冲数据 flush 出去。

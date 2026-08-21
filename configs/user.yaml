@@ -30,6 +30,7 @@ mysql:
   max_idle_conns: 25
   # 须小于 MySQL 的 wait_timeout，否则会拿到已被服务端单方面关闭的连接
   conn_max_lifetime: 30m
+  conn_max_idle_time: 5m
   connect_timeout: 5s
 
 # 停机总超时（全部组件共享）。须小于部署侧给进程的宽限期并留余量：

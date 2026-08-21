@@ -39,20 +39,23 @@ func (f *Format) UnmarshalText(text []byte) error {
 }
 
 // Config 日志构造参数，除 Service 外零值均有合理默认。
+// 标了 yaml 键的字段可由配置文件绑定；yaml:"-" 的是装配期注入项，只能在 Go 里给。
 type Config struct {
 	// Service 服务名，写入每条日志的 service 字段；必填，为空即 panic。
-	Service string
-	// Level 放行级别，nil 取 slog.LevelInfo。
-	// 传 *slog.LevelVar 即可在运行期调级，该变量由调用方持有，本包不代管。
-	Level slog.Leveler
+	Service string `yaml:"-"`
+	// Level 放行级别，零值即 slog.LevelInfo。slog.Level 实现了 encoding.TextUnmarshaler，
+	// 故配置文件里直接写 debug / info / warn / error（大小写不敏感，还支持 info+2 偏移）。
+	// 用具体类型而非 slog.Leveler，是为了让本 Config 能直接作 YAML 绑定目标——接口绑不进去。
+	// 将来要运行期调级，另加一个 yaml:"-" 的 *slog.LevelVar 字段让它优先即可，不必动这里。
+	Level slog.Level `yaml:"level"`
 	// Format 输出格式，零值取 FormatJSON。
-	Format Format
+	Format Format `yaml:"format"`
 	// AddSource 是否附带调用点的文件与行号，默认关。
-	AddSource bool
+	AddSource bool `yaml:"add_source"`
 	// Writer 输出目标，nil 时用 os.Stdout。
-	Writer io.Writer
+	Writer io.Writer `yaml:"-"`
 	// Extractors 从 ctx 提取动态字段的钩子，每条日志按序调用；契约见 Extractor。
-	Extractors []Extractor
+	Extractors []Extractor `yaml:"-"`
 }
 
 // MustNew 按 cfg 构造 Logger。配置非法（Service 为空、Format 不认识）直接 panic——

@@ -38,37 +38,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger := log.MustNew(log.Config{
-		Service:   serviceName,
-		Level:     cfg.Log.Level,
-		Format:    cfg.Log.Format,
-		AddSource: cfg.Log.AddSource,
-		// trace_id / span_id 靠这个钩子进每条日志，日志与链路由此关联。
-		Extractors: []log.Extractor{telemetry.TraceAttrs},
-	})
+	// 以下三段填的都是 pkg Config 里标了 yaml:"-" 的字段：它们是装配期注入项，
+	// 配置文件里没有也不该有。声明式参数已由 conf.MustLoad 绑好，此处不再逐字段抄写。
+	cfg.Log.Service = serviceName
+	// trace_id / span_id 靠这个钩子进每条日志，日志与链路由此关联。
+	cfg.Log.Extractors = []log.Extractor{telemetry.TraceAttrs}
+	logger := log.MustNew(cfg.Log)
 	// 接管全局默认 Logger，让第三方库经 slog 打的日志也走同一 Handler。
 	slog.SetDefault(logger)
 
-	tel := telemetry.MustNew(ctx, telemetry.Config{
-		Service:     serviceName,
-		Version:     version,
-		Env:         cfg.Telemetry.Env,
-		Exporter:    cfg.Telemetry.Exporter,
-		Endpoint:    cfg.Telemetry.Endpoint,
-		Insecure:    cfg.Telemetry.Insecure,
-		SampleRatio: cfg.Telemetry.SampleRatio,
-		Logger:      logger,
-	})
+	cfg.Telemetry.Service = serviceName
+	cfg.Telemetry.Version = version
+	cfg.Telemetry.Logger = logger
+	tel := telemetry.MustNew(ctx, cfg.Telemetry)
 
-	db := mysql.MustNew(ctx, mysql.Config{
-		DSN:             cfg.MySQL.DSN,
-		MaxOpenConns:    cfg.MySQL.MaxOpenConns,
-		MaxIdleConns:    cfg.MySQL.MaxIdleConns,
-		ConnMaxLifetime: cfg.MySQL.ConnMaxLifetime,
-		ConnectTimeout:  cfg.MySQL.ConnectTimeout,
-		Telemetry:       tel,
-		Logger:          logger,
-	})
+	cfg.MySQL.Telemetry = tel
+	cfg.MySQL.Logger = logger
+	db := mysql.MustNew(ctx, cfg.MySQL)
 
 	// 四层手工注入：data → biz → service → server。
 	// 往下传的是 db.DB（*sql.DB）而非 *mysql.Client——后者带着 Start/Stop，

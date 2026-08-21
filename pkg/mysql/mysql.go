@@ -43,22 +43,22 @@ type Telemetry interface {
 // Config MySQL 连接参数。
 type Config struct {
 	// DSN 数据源名，如 user:pass@tcp(host:3306)/db?parseTime=true；必填。
-	DSN string
+	DSN string `yaml:"dsn"`
 	// MaxOpenConns 连接池上限，零值取 25。
-	MaxOpenConns int
+	MaxOpenConns int `yaml:"max_open_conns"`
 	// MaxIdleConns 空闲连接上限，零值取 25。设得比 MaxOpenConns 小会让高峰过后频繁重建连接。
-	MaxIdleConns int
+	MaxIdleConns int `yaml:"max_idle_conns"`
 	// ConnMaxLifetime 连接最长存活时间，零值取 30min。须小于 MySQL 的 wait_timeout，
 	// 否则会拿到已被服务端单方面关闭的连接。
-	ConnMaxLifetime time.Duration
+	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime"`
 	// ConnMaxIdleTime 连接最长空闲时间，零值取 5min。
-	ConnMaxIdleTime time.Duration
+	ConnMaxIdleTime time.Duration `yaml:"conn_max_idle_time"`
 	// ConnectTimeout 装配期探活的重试窗口，零值取 5s。见 MustNew 的说明。
-	ConnectTimeout time.Duration
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 	// Telemetry 可观测性提供方，nil 时完全不埋点（零开销）。
-	Telemetry Telemetry
+	Telemetry Telemetry `yaml:"-"`
 	// Logger 构造与停机日志，nil 时用 slog.Default()。
-	Logger *slog.Logger
+	Logger *slog.Logger `yaml:"-"`
 }
 
 // Client 是带生命周期的 MySQL 连接池。内嵌 *sql.DB，故 QueryContext 等方法可直接调用；

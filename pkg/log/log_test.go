@@ -104,10 +104,10 @@ func messages(t *testing.T, buf *bytes.Buffer) []string {
 func TestMustNewLevel(t *testing.T) {
 	tests := []struct {
 		name  string
-		level slog.Leveler
+		level slog.Level
 		want  []string
 	}{
-		{name: "nil 取默认 Info", level: nil, want: []string{"info 级", "warn 级"}},
+		{name: "零值即 Info", level: 0, want: []string{"info 级", "warn 级"}},
 		{name: "Debug 全放行", level: slog.LevelDebug, want: []string{"debug 级", "info 级", "warn 级"}},
 		{name: "Warn 滤掉 Info", level: slog.LevelWarn, want: []string{"warn 级"}},
 	}
@@ -124,21 +124,6 @@ func TestMustNewLevel(t *testing.T) {
 				t.Errorf("放行的日志不符 (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func TestLevelVarAdjustsLevelAtRuntime(t *testing.T) {
-	var buf bytes.Buffer
-	level := new(slog.LevelVar) // 零值即 Info
-	logger := log.MustNew(log.Config{Service: "user", Level: level, Writer: &buf})
-
-	logger.Debug("调级前")
-	level.Set(slog.LevelDebug)
-	logger.Debug("调级后")
-
-	want := []string{"调级后"}
-	if diff := cmp.Diff(want, messages(t, &buf)); diff != "" {
-		t.Errorf("放行的日志不符 (-want +got):\n%s", diff)
 	}
 }
 

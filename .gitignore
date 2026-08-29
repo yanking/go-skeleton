@@ -1,0 +1,20 @@
+# 构建产物（目录契约：不入库）
+# bin/ 装 make build 的服务二进制，以及 make tools 装到 bin/tools/ 的工具链。
+# tools/ 本身是工具链的独立 module（只有 go.mod/go.sum），要入库。
+/bin/
+
+# 本地会话产物：报告、备份等一律不入库。
+# 例外是接入各 AI 工具的薄适配器：.claude/skills/ 下是指向 .agents/skills/ 的
+# 符号链接——技能内容工具无关地留在 .agents/，Claude Code 靠这层链接才发现得到。
+/.claude/*
+!/.claude/settings.json
+!/.claude/skills
+!/.claude/skills/**
+
+.idea
+
+# 会话计划等本地工作台产物不入库
+/.zcode/
+
+# SDD 执行期的临时工作区(账本、任务简报、评审包),不入库
+.superpowers/

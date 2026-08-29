@@ -1,0 +1,17 @@
+# buf 代码生成:插件走本地(go tool 安装于 GOPATH/bin),paths=source_relative
+# 保持 api/<svc>/v1/x.proto → gen/<svc>/v1/x.pb.go 的目录映射。
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-grpc-gateway
+    out: gen
+    opt: paths=source_relative
+  # OpenAPI v3 文档:api/<svc>/v1/x.proto → openapi/<svc>/v1/x.openapi.json,
+  # 由根级 openapi 包 embed 后经各服务 HTTP 出口的 /docs 提供。
+  - local: protoc-gen-openapiv3
+    out: openapi

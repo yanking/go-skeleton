@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "channel 服务技术架构",
+    "subtitle": "统一多渠道三方支付对接：单一 gRPC 服务，路由三元组定位渠道商户实例",
+    "output": "docs/channel/diagrams/architecture.html",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "east-west-entry",
+        "label": "东西向入口",
+        "focus": ["gateway", "grpc", "handler"],
+        "note": "上游网关经 gRPC 直连，拦截链统一出口翻译与访问日志"
+      },
+      {
+        "id": "routing-core",
+        "label": "路由与适配",
+        "focus": ["service", "postgres", "adapter_payapay", "adapter_neokred"],
+        "note": "内存路由表 + TTL 惰性重载；渠道差异收敛在 adapter 层"
+      },
+      {
+        "id": "reconcile-loop",
+        "label": "补单对账",
+        "focus": ["job", "gateway", "service"],
+        "note": "回调不可靠的渠道靠 15s 轮询拉单核对回推"
+      }
+    ]
+  },
+  "components": [
+    { "id": "gateway", "type": "external", "label": "gateway-backend", "sublabel": "上游支付网关 · gateway-rpc", "pos": [40, 330], "size": [150, 64] },
+    { "id": "grpc", "type": "security", "label": "gRPC Server", "sublabel": ":9092 · errcode 出口翻译 / 访问日志 / otel", "pos": [280, 330], "size": [168, 64] },
+    { "id": "handler", "type": "backend", "label": "handler", "sublabel": "协议出口 · 薄壳互转", "pos": [516, 330], "size": [136, 60] },
+    { "id": "service", "type": "backend", "label": "service", "sublabel": "路由表 · errcode 翻译", "pos": [716, 330], "size": [152, 64] },
+    { "id": "adapter_payapay", "type": "backend", "label": "adapter · payapay", "sublabel": "MD5 签名 · 状态映射", "pos": [964, 196], "size": [168, 64] },
+    { "id": "adapter_neokred", "type": "backend", "label": "adapter · neokred", "sublabel": "Bearer token · 无回调", "pos": [964, 464], "size": [168, 64] },
+    { "id": "payapay_api", "type": "external", "label": "PayaPay API", "sublabel": "代收 / 代付 / 查询 / 余额", "pos": [1216, 196], "size": [148, 60] },
+    { "id": "neokred_api", "type": "external", "label": "Neokred API", "sublabel": "渠道 API + Dashboard", "pos": [1216, 464], "size": [148, 60] },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "channels 表 · 一行一商户", "pos": [716, 560], "size": [152, 64] },
+    { "id": "job", "type": "backend", "label": "reconcile job", "sublabel": "补单对账 · 15s 轮询", "pos": [280, 560], "size": [152, 64] },
+    { "id": "otel", "type": "cloud", "label": "OTel Collector", "sublabel": "trace + metrics", "pos": [1216, 60], "size": [148, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "channel 服务进程（单 pod · pkg/app 编排启停）", "wraps": ["grpc", "handler", "service", "job", "adapter_payapay", "adapter_neokred"] },
+    { "kind": "security-group", "label": "adapter 层：签名 / 报文 / 状态映射不出边界", "wraps": ["adapter_payapay", "adapter_neokred"] }
+  ],
+  "connections": [
+    { "from": "gateway", "to": "grpc", "label": "gRPC · 路由三元组", "variant": "emphasis" },
+    { "from": "grpc", "to": "handler" },
+    { "from": "handler", "to": "service" },
+    { "from": "service", "to": "postgres", "label": "LoadAll · TTL 60s", "fromSide": "bottom", "toSide": "top", "variant": "dashed", "labelDy": 24 },
+    { "from": "service", "to": "adapter_payapay" },
+    { "from": "service", "to": "adapter_neokred" },
+    { "from": "adapter_payapay", "to": "payapay_api", "label": "HTTPS · MD5", "variant": "security", "labelDy": 48 },
+    { "from": "adapter_neokred", "to": "neokred_api", "label": "HTTPS · Bearer", "variant": "security", "labelDy": 48 },
+    { "from": "job", "to": "service", "label": "对账查询", "variant": "dashed" },
+    { "from": "job", "to": "gateway", "label": "拉单 / 回推", "variant": "emphasis", "fromSide": "left", "toSide": "bottom" },
+    { "from": "grpc", "to": "otel", "label": "OTLP", "variant": "dashed", "fromSide": "top", "toSide": "left", "via": [[364, 90]] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "运行形态",
+      "items": [
+        "单进程单 pod：一个 gRPC 服务承载全部渠道商户实例",
+        "路由表内存态，DB 加商户后至多 60s 生效，无需重启",
+        "未登记渠道名的行跳过并告警，单行脏数据不拖死整个服务"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "资金安全边界",
+      "items": [
+        "签名与验签只存在于 adapter 层，业务层不感知渠道细节",
+        "回调验签失败返回 40003，状态未知返回 40004",
+        "补单对账金额一致且非处理中才回推网关"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "可观测与出口",
+      "items": [
+        "拦截链统一 errcode 出口翻译与访问日志，业务代码只写一遍",
+        "OTel stdout / otlp 双导出，trace_id 贯穿日志",
+        "渠道响应原文留痕在 response 字段供网关侧排障"
+      ]
+    }
+  ]
+}

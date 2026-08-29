@@ -29,7 +29,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 |---|---|
 | `README.md` | 人类入口:快速开始与仓库导览 |
 | `CONSTITUTION.md` / 本文件 / `.agents/` | 约束与导航;编码细则在 `.agents/go-style.md`,可执行技能在 `.agents/skills/` |
-| `docs/<svc>/` | 服务的业务文档:架构、时序、接入指南;`diagrams/` 是 archify 渲染页 |
+| `docs/<svc>/` | 服务的业务文档:架构、时序、接入指南;`diagrams/` 是 archify 渲染页(channel 首用) |
 | `docs/toolbox.md` | 仓库级工具参考(make 目标之外的工具,如 archify 画图) |
 | `docs/superpowers/{specs,plans}/` | 按日期归档的技术方案与实施计划 |
 
@@ -62,10 +62,11 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | 分段 | 归属 |
 |---|---|
 | 10000–19999 | `pkg/errcode` 通用码(已用:10001 参数错误、10002 资源不存在、10003 内部错误、10004 未认证) |
+| 40000–49999 | channel(已用:40001 渠道实例不存在、40002 下游渠道请求失败、40003 回调验签失败、40004 回调状态未知、40005 渠道响应解析失败) |
 
 ## 服务分层(`internal/<svc>/`)
 
-目录(六件套):`config`(本服务配置结构体,绑定 `configs/<svc>.yaml`)/ `handler`(协议出口,薄壳,只调 service 并返回 errcode;仅 rpc/both 变体有)/ `service`(业务层,声明仓储接口——依赖倒置支点)/ `repo`(接口的 GORM 实现,ORM 不出本层)/ `model`(表模型,不出服务边界,出口转换由 handler 做)/ `job`(异步任务,实现 app.Component)。传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。
+目录(六件套):`config`(本服务配置结构体,绑定 `configs/<svc>.yaml`)/ `handler`(协议出口,薄壳,只调 service 并返回 errcode;仅 rpc/both 变体有)/ `service`(业务层,声明仓储接口——依赖倒置支点)/ `repo`(接口的 GORM 实现,ORM 不出本层)/ `model`(表模型,不出服务边界,出口转换由 handler 做)/ `job`(异步任务,实现 app.Component);对接三方渠道/供应商的服务可加 `adapter` 层(签名、报文拼装、响应解析、状态映射不出本层,channel 服务首用)。传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。
 
 gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成 gRPC 调用、经环回打回本进程,故拦截链对两种协议同样生效,业务代码只写一遍。两者各占一个端口,暴露范围、mesh 协议标注与网络策略可分别配置。
 
@@ -78,6 +79,8 @@ gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成
 ## 服务开发流程(从零加一个服务的动线)
 
 一个服务的产品落点(以 `<svc>` 代称):`api/<svc>/` proto 契约(`make proto` 生成到 `gen/` 的 pb、stub、gateway 转译与 OpenAPI spec)/ `cmd/<svc>/` 入口(`main.go` + `initial/` 装配)/ `configs/<svc>.yaml` 声明式配置 / `internal/<svc>/` 业务六件套(见上节)/ `migrations/<svc>/` goose 迁移(有库才有)。
+
+`api/` 下还会有**外部契约镜像**(现有 `api/gateway/`:上游 gateway-backend 仓 proto 的镜像,只为生成 client stub 供本仓服务调用)。它不是本仓服务——没有 `cmd/`、`configs/`、`internal/` 落点,也不要给它补;上游契约变更时同步该 proto 文件。
 
 1. **渲染入口**:用 `.agents/skills/new-service` 技能按变体(none/rpc/both)生成骨架与配置,随后按其清单登记错误码分段。
 2. **契约先行**:在 `api/<svc>/` 写 proto,要 HTTP 出口就加 `google.api.http` 注解;注释格式按 `.agents/go-style.md`「proto 注释」(直接决定文档页的标题与字段说明),`make proto` 生成全部产物。

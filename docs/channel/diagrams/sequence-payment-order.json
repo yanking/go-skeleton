@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "代收下单时序（PaymentOrder）",
+    "subtitle": "gateway → channel 服务 → 三方渠道：一次调用穿完拦截链、路由表与适配器",
+    "output": "docs/channel/diagrams/sequence-payment-order.html",
+    "viewBox": [960, 740],
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "entry", "label": "入口与路由", "focus": ["gw", "tr", "hdl", "svc"], "note": "拦截链统一出口翻译，handler 薄壳，service 查路由表" },
+      { "id": "channel", "label": "渠道交互", "focus": ["svc", "adp", "chan"], "note": "签名、拼装、解析、状态映射全部收敛在 adapter" },
+      { "id": "return", "label": "响应回程", "focus": ["adp", "svc", "hdl", "tr", "gw"], "note": "渠道原文留痕，错误统一翻译为业务 errcode" }
+    ]
+  },
+  "participants": [
+    { "id": "gw", "type": "external", "label": "gateway", "sublabel": "上游网关" },
+    { "id": "tr", "type": "security", "label": "gRPC 拦截链", "sublabel": ":9092" },
+    { "id": "hdl", "type": "backend", "label": "handler", "sublabel": "薄壳互转" },
+    { "id": "svc", "type": "backend", "label": "service", "sublabel": "路由表" },
+    { "id": "adp", "type": "backend", "label": "adapter", "sublabel": "payapay" },
+    { "id": "chan", "type": "external", "label": "PayaPay", "sublabel": "三方渠道" }
+  ],
+  "segments": [
+    { "from": 165, "to": 320, "label": "请求穿层 · 路由命中" },
+    { "from": 336, "to": 436, "label": "渠道下单" },
+    { "from": 452, "to": 648, "label": "响应回程" }
+  ],
+  "messages": [
+    { "id": "m1", "from": "gw", "to": "tr", "y": 180, "label": "PaymentOrder(route, order_no, amount, …)", "variant": "emphasis", "note": "route 三元组定位唯一渠道商户实例" },
+    { "id": "m2", "from": "tr", "to": "hdl", "y": 224, "label": "转发 handler" },
+    { "id": "m3", "from": "hdl", "to": "svc", "y": 262, "label": "svc.PaymentOrder(route, in)" },
+    { "id": "m4", "from": "svc", "to": "adp", "y": 304, "label": "instance.PaymentOrder(in)", "note": "lookup 命中内存路由表；TTL 60s 到期惰性重载" },
+    { "id": "m5", "from": "adp", "to": "chan", "y": 356, "label": "POST CreatePayInOrder（MD5 签名）", "variant": "security" },
+    { "id": "m6", "from": "chan", "to": "adp", "y": 404, "label": "code=200 · pay_url + dis_order_no", "variant": "return", "note": "非 200 / 业务码失败 → 哨兵 ErrChannelRejected → 翻译 40002" },
+    { "id": "m7", "from": "adp", "to": "svc", "y": 462, "label": "PaymentOrderOut{url, out_order_no, response}", "variant": "return" },
+    { "id": "m8", "from": "svc", "to": "hdl", "y": 506, "label": "PaymentOrderOut", "variant": "return" },
+    { "id": "m9", "from": "hdl", "to": "tr", "y": 542, "label": "proto 响应", "variant": "return" },
+    { "id": "m10", "from": "tr", "to": "gw", "y": 582, "label": "PaymentOrderResponse", "variant": "return", "note": "访问日志记方法 / 状态码 / 耗时，trace_id 附带" }
+  ],
+  "activations": [
+    { "participant": "tr", "from": 176, "to": 590, "type": "security" },
+    { "participant": "hdl", "from": 220, "to": 548, "type": "backend" },
+    { "participant": "svc", "from": 258, "to": 512, "type": "backend" },
+    { "participant": "adp", "from": 300, "to": 468, "type": "backend" },
+    { "participant": "chan", "from": 352, "to": 410, "type": "external" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主路径",
+      "items": [
+        "一次 gRPC 调用直达渠道适配器，中间层无业务分支",
+        "handler 只做 proto ↔ 协议中立类型互转",
+        "service 只做路由解析与错误翻译"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败翻译",
+      "items": [
+        "网络错 / 非 200 / 业务码失败 → ErrChannelRejected → 40002",
+        "响应无法解析 → ErrBadResponse → 40005",
+        "原始错误挂 cause 链只进日志，客户端只见业务码"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "留痕与观测",
+      "items": [
+        "渠道响应原文放入 response 字段供网关侧排障",
+        "拦截链统一访问日志与 otel 遥测",
+        "路由未命中返回 40001，三元组缺字段返回 10001"
+      ]
+    }
+  ]
+}

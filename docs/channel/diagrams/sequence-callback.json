@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "代收回调验签时序（PaymentCallback）",
+    "subtitle": "三方渠道 → gateway HTTP 入口 → channel 服务：header 与 body 原样转发，验签与状态映射收敛在 adapter",
+    "output": "docs/channel/diagrams/sequence-callback.html",
+    "viewBox": [960, 700],
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "forward", "label": "原样转发", "focus": ["chan", "gw", "tr", "hdl"], "note": "gateway 按 channelId 反查三元组，报文不做任何加工" },
+      { "id": "verify", "label": "验签与映射", "focus": ["svc", "adp"], "note": "重算 MD5 比对 sign；渠道私有状态映射为对外回调类型" },
+      { "id": "receipt", "label": "回执", "focus": ["gw", "chan"], "note": "验签通过才按 callback_return 应答渠道" }
+    ]
+  },
+  "participants": [
+    { "id": "chan", "type": "external", "label": "PayaPay", "sublabel": "三方渠道" },
+    { "id": "gw", "type": "external", "label": "gateway", "sublabel": "HTTP 入口" },
+    { "id": "tr", "type": "security", "label": "gRPC 拦截链", "sublabel": ":9092" },
+    { "id": "hdl", "type": "backend", "label": "handler", "sublabel": "薄壳互转" },
+    { "id": "svc", "type": "backend", "label": "service", "sublabel": "路由表" },
+    { "id": "adp", "type": "backend", "label": "adapter", "sublabel": "payapay" }
+  ],
+  "segments": [
+    { "from": 165, "to": 316, "label": "三方回调 → 原样转发" },
+    { "from": 332, "to": 428, "label": "验签与状态映射" },
+    { "from": 444, "to": 608, "label": "回执" }
+  ],
+  "messages": [
+    { "id": "m1", "from": "chan", "to": "gw", "y": 180, "label": "POST 回调报文（含 sign）", "variant": "emphasis" },
+    { "id": "m2", "from": "gw", "to": "tr", "y": 224, "label": "PaymentCallback(route, header, data)", "note": "按 channelId 反查路由三元组；header 与 body 原样转发" },
+    { "id": "m3", "from": "tr", "to": "hdl", "y": 266, "label": "转发 handler" },
+    { "id": "m4", "from": "hdl", "to": "svc", "y": 302, "label": "svc.PaymentCallback" },
+    { "id": "m5", "from": "svc", "to": "adp", "y": 344, "label": "instance.PaymentCallback(data)", "note": "跳过 sign 与空值、按 key 排序重算 MD5 比对：不符 → 40003" },
+    { "id": "m6", "from": "adp", "to": "svc", "y": 404, "label": "CallbackOut{type, amount}", "variant": "return", "note": "status 2 → 成功取 real_price；3 → 失败取 order_price；其他 → 40004" },
+    { "id": "m7", "from": "svc", "to": "hdl", "y": 452, "label": "CallbackOut", "variant": "return" },
+    { "id": "m8", "from": "hdl", "to": "tr", "y": 488, "label": "proto 响应", "variant": "return" },
+    { "id": "m9", "from": "tr", "to": "gw", "y": 524, "label": "PaymentCallbackResponse", "variant": "return" },
+    { "id": "m10", "from": "gw", "to": "chan", "y": 566, "label": "应答 callback_return「success」", "variant": "return", "note": "验签失败（40003/40004）不应答 success，渠道将重试" }
+  ],
+  "activations": [
+    { "participant": "gw", "from": 176, "to": 574, "type": "external" },
+    { "participant": "tr", "from": 220, "to": 532, "type": "security" },
+    { "participant": "hdl", "from": 262, "to": 496, "type": "backend" },
+    { "participant": "svc", "from": 298, "to": 458, "type": "backend" },
+    { "participant": "adp", "from": 340, "to": 410, "type": "backend" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "资金安全边界",
+      "items": [
+        "验签只发生在 adapter 层，gateway 与 channel 业务层不碰签名",
+        "签名不符返回 40003，报文状态未知返回 40004",
+        "报文无法解析返回 40005"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "金额口径",
+      "items": [
+        "成功回调取 real_price（实收），失败回调取 order_price（原单）",
+        "payapay 既有口径，代付失败状态 3/7/9 均映射为失败",
+        "金额单位一律为分"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "回执与重试",
+      "items": [
+        "验签通过 gateway 才按 callback_return 应答 success",
+        "失败应答渠道侧会重推，靠幂等消化",
+        "无回调渠道（neokred 形态）返回 10001，状态靠对账轮询"
+      ]
+    }
+  ]
+}

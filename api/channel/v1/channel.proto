@@ -1,0 +1,361 @@
+// channel 服务的对外契约：统一多渠道商户的三方支付对接（原 gateway-channel 每
+// 分支一份的 channel.proto 演进而来）。文档优先：注释即接口文档。
+syntax = "proto3";
+
+package channel.v1;
+
+option go_package = "github.com/yanking/go-skeleton/gen/channel/v1;channelv1";
+
+// 路由三元组。
+//
+// 在统一服务里定位唯一的渠道商户实例，所有请求均须携带；
+// 取值以 ListChannels 返回的 ChannelInfo 为准。
+message Route {
+  // 渠道名，小写规范形式（如 payapay）。
+  string channel_name = 1;
+
+  // 商户号。
+  string merchant_no = 2;
+
+  // 币种。
+  string currency = 3;
+}
+
+// 渠道商户实例的元数据（原单实例 InfoReply 演进为列表元素）。
+//
+// 与 channels 表一行对应；金额与限额单位分，费率千分位。
+message ChannelInfo {
+  // 渠道名，小写规范形式。
+  string channel_name = 1;
+
+  // 商户号。
+  string merchant_no = 2;
+
+  // 币种。
+  string currency = 3;
+
+  // 渠道等级：1 唤醒 2 原生 3 可选 Deeplink 4 仅 Deeplink。
+  int32 channel_level = 4;
+
+  // 回调验签所需的 HTTP 头名单，gateway 按此原样转发。
+  repeated string callback_headers = 5;
+
+  // 回调报文来源：1 Body 2 UrlQuery。
+  int32 callback_data_source = 6;
+
+  // 回调应答文本，三方期望收到的应答体原文。
+  string callback_return = 7;
+
+  // 回调来源 IP 白名单，逗号分隔；空即不校验。
+  string callback_ip_whitelist = 8;
+
+  // 支持的代付方式：1 银行 2 UPI。
+  repeated int32 payout_supports = 9;
+
+  // 代收单笔下限（分）。
+  int64 limit_payment_min = 10;
+
+  // 代收单笔上限（分）。
+  int64 limit_payment_max = 11;
+
+  // 代付单笔下限（分）。
+  int64 limit_payout_min = 12;
+
+  // 代付单笔上限（分）。
+  int64 limit_payout_max = 13;
+
+  // 代收费率（千分位）。
+  int32 payment_commission_rate = 14;
+
+  // 代收单笔固定加收（分）。
+  int32 payment_commission_extra = 15;
+
+  // 代付费率（千分位）。
+  int32 payout_commission_rate = 16;
+
+  // 代付单笔固定加收（分）。
+  int32 payout_commission_extra = 17;
+}
+
+// 全量元数据查询的入参，暂无字段。
+message ListChannelsRequest {}
+
+// 全量元数据查询的出参。
+message ListChannelsResponse {
+  // 全部渠道商户实例。
+  repeated ChannelInfo channels = 1;
+}
+
+// 代收下单入参。
+message PaymentOrderRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 网关侧订单号。
+  string order_no = 2;
+
+  // 金额（分）。
+  int64 amount = 3;
+
+  // 付款人姓名。
+  string name = 4;
+
+  // 付款人手机号。
+  string phone = 5;
+
+  // 付款人邮箱。
+  string email = 6;
+
+  // 回调通知地址。
+  string notify_url = 7;
+
+  // 是否要求 Deeplink 形态的支付链接。
+  bool deeplink = 8;
+
+  // 支付超时时长，是否生效及单位由渠道适配器决定。
+  int32 timeout = 9;
+}
+
+// 代收下单出参。
+message PaymentOrderResponse {
+  // 支付链接（UPI intent 或收银台地址）。
+  string url = 1;
+
+  // 渠道侧订单号。
+  string out_order_no = 2;
+
+  // 渠道响应原文，网关侧排障留痕。
+  string response = 3;
+
+  // 三方侧商户账号标识（如渠道登录邮箱），多账号排障用；渠道无此概念时为空。
+  string tripartite_account = 4;
+}
+
+// 代付下单入参。
+message PayoutOrderRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 代付方式：1 银行 2 UPI。
+  int32 way_code = 2;
+
+  // 网关侧订单号。
+  string order_no = 3;
+
+  // 金额（分）。
+  int64 amount = 4;
+
+  // 收款人姓名。
+  string name = 5;
+
+  // 收款人手机号。
+  string phone = 6;
+
+  // 收款人邮箱。
+  string email = 7;
+
+  // 收款银行名。
+  string bank_name = 8;
+
+  // 银行行号（如印度 IFSC）。
+  string bank_code = 9;
+
+  // 收款账号（银行卡号或 UPI VPA）。
+  string account_no = 10;
+
+  // 回调通知地址。
+  string notify_url = 11;
+}
+
+// 代付下单出参。
+message PayoutOrderResponse {
+  // 渠道侧订单号。
+  string out_order_no = 1;
+
+  // 渠道响应原文，网关侧排障留痕。
+  string response = 2;
+
+  // 三方侧商户账号标识，同 PaymentOrderResponse。
+  string tripartite_account = 3;
+}
+
+// 代收/代付的查询与回调入出参同构；按 RPC 独立成对是 buf lint 对
+// 请求响应唯一性与命名的硬性要求，字段演进时须同步另一侧。
+
+// 代收订单查询入参。
+message PaymentQueryRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 网关侧订单号，与 out_order_no 至少给其一。
+  string order_no = 2;
+
+  // 渠道侧订单号。
+  string out_order_no = 3;
+}
+
+// 代收订单查询出参。
+message PaymentQueryResponse {
+  // 对外订单状态：1 处理中 2 成功 3 失败。
+  int32 status = 1;
+
+  // 渠道确认的金额（分）。
+  int64 amount = 2;
+
+  // 渠道侧订单号。
+  string out_order_no = 3;
+
+  // 渠道响应原文，网关侧排障留痕。
+  string response = 4;
+
+  // 渠道侧支付参考号（如印度 UTR），无则为空。
+  string reference_no = 5;
+}
+
+// 代付订单查询入参。
+message PayoutQueryRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 网关侧订单号，与 out_order_no 至少给其一。
+  string order_no = 2;
+
+  // 渠道侧订单号。
+  string out_order_no = 3;
+}
+
+// 代付订单查询出参。
+message PayoutQueryResponse {
+  // 对外订单状态：1 处理中 2 成功 3 失败。
+  int32 status = 1;
+
+  // 渠道确认的金额（分）。
+  int64 amount = 2;
+
+  // 渠道侧订单号。
+  string out_order_no = 3;
+
+  // 渠道响应原文，网关侧排障留痕。
+  string response = 4;
+
+  // 渠道侧支付参考号（如印度 UTR），无则为空。
+  string reference_no = 5;
+}
+
+// 代收回调验签入参。
+message PaymentCallbackRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 三方回调的 HTTP 头，gateway 按 ChannelInfo.callback_headers 原样转发。
+  map<string, string> header = 2;
+
+  // 回调报文原文（Body 或 UrlQuery，来源见 ChannelInfo.callback_data_source）。
+  string data = 3;
+}
+
+// 代收回调验签出参。
+message PaymentCallbackResponse {
+  // 网关侧订单号，从报文解出。
+  string order_no = 1;
+
+  // 渠道侧订单号。
+  string out_order_no = 2;
+
+  // 回调结论：1 成功 2 失败。
+  int32 callback_type = 3;
+
+  // 回调金额（分）。
+  int64 amount = 4;
+
+  // 渠道侧支付参考号，无则为空。
+  string reference_no = 5;
+}
+
+// 代付回调验签入参。
+message PayoutCallbackRequest {
+  // 路由三元组。
+  Route route = 1;
+
+  // 三方回调的 HTTP 头，转发约定同 PaymentCallbackRequest。
+  map<string, string> header = 2;
+
+  // 回调报文原文。
+  string data = 3;
+}
+
+// 代付回调验签出参。
+message PayoutCallbackResponse {
+  // 网关侧订单号，从报文解出。
+  string order_no = 1;
+
+  // 渠道侧订单号。
+  string out_order_no = 2;
+
+  // 回调结论：1 成功 2 失败。
+  int32 callback_type = 3;
+
+  // 回调金额（分）。
+  int64 amount = 4;
+
+  // 渠道侧支付参考号，无则为空。
+  string reference_no = 5;
+}
+
+// 余额查询入参。
+message BalanceQueryRequest {
+  // 路由三元组。
+  Route route = 1;
+}
+
+// 余额查询出参。
+message BalanceQueryResponse {
+  // 可用余额（分）。
+  int64 balance = 1;
+
+  // 冻结余额（分）。
+  int64 frozen_balance = 2;
+}
+
+// 渠道商户统一入口。
+//
+// 原「一商户一进程」的 8 个 RPC 收敛于此，以 Route 路由到具体渠道适配器。
+service ChannelService {
+  // 全量渠道元数据快照
+  //
+  // 替代原 etcd watch + Info 的注册流。
+  rpc ListChannels(ListChannelsRequest) returns (ListChannelsResponse);
+
+  // 代收下单
+  //
+  // route 未命中返回 40001。
+  rpc PaymentOrder(PaymentOrderRequest) returns (PaymentOrderResponse);
+
+  // 代付下单
+  //
+  // route 未命中返回 40001。
+  rpc PayoutOrder(PayoutOrderRequest) returns (PayoutOrderResponse);
+
+  // 代收订单查询
+  //
+  // order_no 与 out_order_no 至少给其一。
+  rpc PaymentQuery(PaymentQueryRequest) returns (PaymentQueryResponse);
+
+  // 代付订单查询
+  //
+  // order_no 与 out_order_no 至少给其一。
+  rpc PayoutQuery(PayoutQueryRequest) returns (PayoutQueryResponse);
+
+  // 代收回调验签
+  //
+  // gateway 收到三方回调后把 header 与 body 原样转发至此。
+  rpc PaymentCallback(PaymentCallbackRequest) returns (PaymentCallbackResponse);
+
+  // 代付回调验签
+  //
+  // 报文形态同 PaymentCallback。
+  rpc PayoutCallback(PayoutCallbackRequest) returns (PayoutCallbackResponse);
+
+  // 渠道商户余额查询
+  rpc BalanceQuery(BalanceQueryRequest) returns (BalanceQueryResponse);
+}

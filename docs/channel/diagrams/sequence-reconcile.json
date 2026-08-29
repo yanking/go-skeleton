@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "补单对账时序（Reconcile Job）",
+    "subtitle": "回调缺失或不可靠的渠道（neokred 形态）：15s 轮询拉网关未完结单，查渠道真实状态，金额一致才回推",
+    "output": "docs/channel/diagrams/sequence-reconcile.html",
+    "viewBox": [960, 780],
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "pull", "label": "路由与拉单", "focus": ["job", "svc", "gw"], "note": "仅遍历 reconcile_enabled 的路由；拉取 30 分钟窗口内未完结单" },
+      { "id": "verify", "label": "逐单核对", "focus": ["job", "svc", "adp", "chan"], "note": "查渠道真实状态；处理中或金额不符一律跳过" },
+      { "id": "push", "label": "回推网关", "focus": ["job", "gw"], "note": "终态且金额一致才回推，网关按回调同等处理" }
+    ]
+  },
+  "participants": [
+    { "id": "job", "type": "backend", "label": "reconcile", "sublabel": "15s 轮询" },
+    { "id": "gw", "type": "external", "label": "gateway-rpc", "sublabel": "上游网关" },
+    { "id": "svc", "type": "backend", "label": "service", "sublabel": "路由表" },
+    { "id": "adp", "type": "backend", "label": "adapter", "sublabel": "渠道查询" },
+    { "id": "chan", "type": "external", "label": "渠道 API", "sublabel": "三方" }
+  ],
+  "segments": [
+    { "from": 165, "to": 322, "label": "路由清单与拉单" },
+    { "from": 338, "to": 580, "label": "逐单核对" },
+    { "from": 596, "to": 686, "label": "回推" }
+  ],
+  "messages": [
+    { "id": "m1", "from": "job", "to": "svc", "y": 180, "label": "ReconcileRoutes()", "note": "TTL 到期先惰性重载路由表" },
+    { "id": "m2", "from": "svc", "to": "job", "y": 218, "label": "开启补单的路由列表", "variant": "return" },
+    { "id": "m3", "from": "job", "to": "gw", "y": 266, "label": "TripartiteUnfinishedOrders(30min)", "variant": "emphasis" },
+    { "id": "m4", "from": "gw", "to": "job", "y": 308, "label": "payments / payouts 未完结单", "variant": "return" },
+    { "id": "m5", "from": "job", "to": "svc", "y": 362, "label": "PaymentQuery / PayoutQuery(order)" },
+    { "id": "m6", "from": "svc", "to": "adp", "y": 400, "label": "instance 查询" },
+    { "id": "m7", "from": "adp", "to": "chan", "y": 442, "label": "查询渠道交易状态", "variant": "security" },
+    { "id": "m8", "from": "chan", "to": "adp", "y": 482, "label": "状态 + 实际金额", "variant": "return" },
+    { "id": "m9", "from": "adp", "to": "svc", "y": 522, "label": "QueryOut{status, amount}", "variant": "return" },
+    { "id": "m10", "from": "svc", "to": "job", "y": 560, "label": "QueryOut", "variant": "return" },
+    { "id": "m11", "from": "job", "to": "gw", "y": 622, "label": "TripartiteOrderCallback(终态)", "variant": "emphasis", "note": "仅终态且金额与网关记录一致才回推；处理中 / 金额不符跳过" }
+  ],
+  "activations": [
+    { "participant": "job", "from": 176, "to": 630, "type": "backend" },
+    { "participant": "gw", "from": 260, "to": 314, "type": "external" },
+    { "participant": "svc", "from": 356, "to": 566, "type": "backend" },
+    { "participant": "adp", "from": 394, "to": 528, "type": "backend" },
+    { "participant": "chan", "from": 436, "to": 488, "type": "external" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "兜底语义",
+      "items": [
+        "渠道不回调或回调不可靠时，靠查询轮询闭环订单状态",
+        "按商户行 reconcile_enabled 开关，渠道粒度启用",
+        "configs 的 gateway.addr 留空则整个 job 不装配"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "金额一致才回推",
+      "items": [
+        "渠道金额 ≠ 网关记录 → 跳过不回推，留人工核查",
+        "状态仍处理中 → 跳过，下一轮再看",
+        "防止渠道侧金额错乱放大为资金事故"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "失败隔离",
+      "items": [
+        "单轮失败仅记 Warn 日志，下一轮重试",
+        "对账是兜底通道，不放大为服务故障",
+        "首轮启动立即执行，随后按 15s 周期"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,352 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "payment",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/payment/orders": {
+      "post": {
+        "tags": [
+          "PaymentService"
+        ],
+        "summary": "创建代收订单",
+        "description": "app_id 未命中或验签失败统一返回未认证（10004，不区分具体原因防探测）；\nmch_order_no 商户侧重复返回 50001；商户或渠道限额超出返回 50002。",
+        "operationId": "PaymentService_CreatePaymentOrder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "amount": {
+                    "type": "string",
+                    "format": "int64",
+                    "description": "金额（分）。"
+                  },
+                  "appId": {
+                    "type": "string",
+                    "description": "商户应用标识。"
+                  },
+                  "channelName": {
+                    "type": "string",
+                    "description": "指定渠道名，空即按绑定优先级自动选路。"
+                  },
+                  "currency": {
+                    "type": "string",
+                    "description": "币种，如 INR。"
+                  },
+                  "mchOrderNo": {
+                    "type": "string",
+                    "description": "商户订单号，商户侧唯一。"
+                  },
+                  "notifyUrl": {
+                    "type": "string",
+                    "description": "终态异步通知地址，空即不通知。"
+                  },
+                  "payerEmail": {
+                    "type": "string",
+                    "description": "付款人邮箱，是否必填由渠道决定。"
+                  },
+                  "payerName": {
+                    "type": "string",
+                    "description": "付款人姓名，是否必填由渠道决定。"
+                  },
+                  "payerPhone": {
+                    "type": "string",
+                    "description": "付款人手机号，是否必填由渠道决定。"
+                  },
+                  "sign": {
+                    "type": "string",
+                    "description": "HMAC-SHA256 签名，规范见 /docs 签名说明。"
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "format": "int64",
+                    "description": "毫秒时间戳，与服务器偏差超过 5 分钟拒绝。"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/google.rpc.Status"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "创建代收订单出参。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/payment.v1.CreatePaymentOrderResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment/orders/query": {
+      "post": {
+        "tags": [
+          "PaymentService"
+        ],
+        "summary": "查询代收订单",
+        "description": "order_no 与 mch_order_no 至少给其一；命中他人订单按资源不存在（10002）处理，不泄露存在性。",
+        "operationId": "PaymentService_QueryPaymentOrder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "appId": {
+                    "type": "string",
+                    "description": "商户应用标识。"
+                  },
+                  "mchOrderNo": {
+                    "type": "string",
+                    "description": "商户订单号，与 order_no 至少给其一。"
+                  },
+                  "orderNo": {
+                    "type": "string",
+                    "description": "平台订单号，与 mch_order_no 至少给其一。"
+                  },
+                  "sign": {
+                    "type": "string",
+                    "description": "HMAC-SHA256 签名，规范见 /docs 签名说明。"
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "format": "int64",
+                    "description": "毫秒时间戳，与服务器偏差超过 5 分钟拒绝。"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/google.rpc.Status"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "查询代收订单出参。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/payment.v1.QueryPaymentOrderResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment/channels/query": {
+      "post": {
+        "tags": [
+          "PaymentService"
+        ],
+        "summary": "查询可用渠道",
+        "description": "按商户绑定与渠道实例限额汇总，currency 为空返回全部币种。",
+        "operationId": "PaymentService_ListAvailableChannels",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "appId": {
+                    "type": "string",
+                    "description": "商户应用标识。"
+                  },
+                  "currency": {
+                    "type": "string",
+                    "description": "币种，空即返回全部币种。"
+                  },
+                  "sign": {
+                    "type": "string",
+                    "description": "HMAC-SHA256 签名，规范见 /docs 签名说明。"
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "format": "int64",
+                    "description": "毫秒时间戳，与服务器偏差超过 5 分钟拒绝。"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/google.rpc.Status"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "查询可用渠道出参。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/payment.v1.ListAvailableChannelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "google.rpc.Status": {
+        "type": "object",
+        "description": "The Status type defines a logical error model suitable for different programming environments.",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The status code, which should be an enum value of google.rpc.Code."
+          },
+          "details": {
+            "type": "array",
+            "description": "A list of messages that carry the error details.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "@type": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "message": {
+            "type": "string",
+            "description": "A developer-facing error message."
+          }
+        }
+      },
+      "payment.v1.AvailableChannel": {
+        "type": "object",
+        "description": "可用渠道条目，同渠道多实例已按限额取并集。",
+        "properties": {
+          "channelName": {
+            "type": "string",
+            "description": "渠道名。"
+          },
+          "currency": {
+            "type": "string",
+            "description": "币种。"
+          },
+          "limitMax": {
+            "type": "string",
+            "format": "int64",
+            "description": "单笔上限（分）。"
+          },
+          "limitMin": {
+            "type": "string",
+            "format": "int64",
+            "description": "单笔下限（分）。"
+          }
+        }
+      },
+      "payment.v1.CreatePaymentOrderResponse": {
+        "type": "object",
+        "description": "创建代收订单出参。",
+        "properties": {
+          "orderNo": {
+            "type": "string",
+            "description": "平台订单号。"
+          },
+          "payUrl": {
+            "type": "string",
+            "description": "支付链接。"
+          }
+        }
+      },
+      "payment.v1.ListAvailableChannelsResponse": {
+        "type": "object",
+        "description": "查询可用渠道出参。",
+        "properties": {
+          "channels": {
+            "type": "array",
+            "description": "可用渠道列表，按 channel_name 去重。",
+            "items": {
+              "$ref": "#/components/schemas/payment.v1.AvailableChannel"
+            }
+          }
+        }
+      },
+      "payment.v1.QueryPaymentOrderResponse": {
+        "type": "object",
+        "description": "查询代收订单出参。",
+        "properties": {
+          "amount": {
+            "type": "string",
+            "format": "int64",
+            "description": "金额（分）。"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "int64",
+            "description": "终态毫秒时间戳，未完结为 0。"
+          },
+          "fee": {
+            "type": "string",
+            "format": "int64",
+            "description": "商户手续费（分）。"
+          },
+          "mchOrderNo": {
+            "type": "string",
+            "description": "商户订单号。"
+          },
+          "orderNo": {
+            "type": "string",
+            "description": "平台订单号。"
+          },
+          "referenceNo": {
+            "type": "string",
+            "description": "渠道支付参考号，无则为空。"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "订单状态：1 处理中 2 成功 3 失败。"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "PaymentService",
+      "description": "商户面支付服务：下单、查单、可用渠道查询，所有请求经固定字段签名鉴权。"
+    }
+  ]
+}

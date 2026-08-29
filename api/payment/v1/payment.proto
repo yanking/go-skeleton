@@ -1,0 +1,157 @@
+// payment 服务的商户面契约：下单、查单、可用渠道查询，经 grpc-gateway 转译为
+// HTTP/JSON 出口；请求以固定字段签名鉴权，规范见服务 HTTP 出口的 /docs 页。
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "github.com/yanking/go-skeleton/gen/payment/v1;paymentv1";
+
+import "google/api/annotations.proto";
+
+// 创建代收订单入参。
+message CreatePaymentOrderRequest {
+  // 商户应用标识。
+  string app_id = 1;
+
+  // 商户订单号，商户侧唯一。
+  string mch_order_no = 2;
+
+  // 金额（分）。
+  int64 amount = 3;
+
+  // 币种，如 INR。
+  string currency = 4;
+
+  // 指定渠道名，空即按绑定优先级自动选路。
+  string channel_name = 5;
+
+  // 终态异步通知地址，空即不通知。
+  string notify_url = 6;
+
+  // 付款人姓名，是否必填由渠道决定。
+  string payer_name = 7;
+
+  // 付款人手机号，是否必填由渠道决定。
+  string payer_phone = 8;
+
+  // 付款人邮箱，是否必填由渠道决定。
+  string payer_email = 9;
+
+  // 毫秒时间戳，与服务器偏差超过 5 分钟拒绝。
+  int64 timestamp = 10;
+
+  // HMAC-SHA256 签名，规范见 /docs 签名说明。
+  string sign = 11;
+}
+
+// 创建代收订单出参。
+message CreatePaymentOrderResponse {
+  // 平台订单号。
+  string order_no = 1;
+
+  // 支付链接。
+  string pay_url = 2;
+}
+
+// 查询代收订单入参。
+message QueryPaymentOrderRequest {
+  // 商户应用标识。
+  string app_id = 1;
+
+  // 平台订单号，与 mch_order_no 至少给其一。
+  string order_no = 2;
+
+  // 商户订单号，与 order_no 至少给其一。
+  string mch_order_no = 3;
+
+  // 毫秒时间戳，与服务器偏差超过 5 分钟拒绝。
+  int64 timestamp = 4;
+
+  // HMAC-SHA256 签名，规范见 /docs 签名说明。
+  string sign = 5;
+}
+
+// 查询代收订单出参。
+message QueryPaymentOrderResponse {
+  // 平台订单号。
+  string order_no = 1;
+
+  // 商户订单号。
+  string mch_order_no = 2;
+
+  // 订单状态：1 处理中 2 成功 3 失败。
+  int32 status = 3;
+
+  // 金额（分）。
+  int64 amount = 4;
+
+  // 商户手续费（分）。
+  int64 fee = 5;
+
+  // 渠道支付参考号，无则为空。
+  string reference_no = 6;
+
+  // 终态毫秒时间戳，未完结为 0。
+  int64 completed_at = 7;
+}
+
+// 查询可用渠道入参。
+message ListAvailableChannelsRequest {
+  // 商户应用标识。
+  string app_id = 1;
+
+  // 币种，空即返回全部币种。
+  string currency = 2;
+
+  // 毫秒时间戳，与服务器偏差超过 5 分钟拒绝。
+  int64 timestamp = 3;
+
+  // HMAC-SHA256 签名，规范见 /docs 签名说明。
+  string sign = 4;
+}
+
+// 可用渠道条目，同渠道多实例已按限额取并集。
+message AvailableChannel {
+  // 渠道名。
+  string channel_name = 1;
+
+  // 币种。
+  string currency = 2;
+
+  // 单笔下限（分）。
+  int64 limit_min = 3;
+
+  // 单笔上限（分）。
+  int64 limit_max = 4;
+}
+
+// 查询可用渠道出参。
+message ListAvailableChannelsResponse {
+  // 可用渠道列表，按 channel_name 去重。
+  repeated AvailableChannel channels = 1;
+}
+
+// 商户面支付服务：下单、查单、可用渠道查询，所有请求经固定字段签名鉴权。
+service PaymentService {
+  // 创建代收订单
+  //
+  // app_id 未命中或验签失败统一返回未认证（10004，不区分具体原因防探测）；
+  // mch_order_no 商户侧重复返回 50001；商户或渠道限额超出返回 50002。
+  rpc CreatePaymentOrder(CreatePaymentOrderRequest) returns (CreatePaymentOrderResponse) {
+    option (google.api.http) = { post: "/v1/payment/orders", body: "*" };
+  }
+
+  // 查询代收订单
+  //
+  // order_no 与 mch_order_no 至少给其一；命中他人订单按资源不存在（10002）处理，不泄露存在性。
+  rpc QueryPaymentOrder(QueryPaymentOrderRequest) returns (QueryPaymentOrderResponse) {
+    option (google.api.http) = { post: "/v1/payment/orders/query", body: "*" };
+  }
+
+  // 查询可用渠道
+  //
+  // 按商户绑定与渠道实例限额汇总，currency 为空返回全部币种。
+  rpc ListAvailableChannels(ListAvailableChannelsRequest) returns (ListAvailableChannelsResponse) {
+    option (google.api.http) = { post: "/v1/payment/channels/query", body: "*" };
+  }
+}

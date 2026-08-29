@@ -1,0 +1,52 @@
+# price 服务配置:只放声明式参数。本期只做现货。
+
+log:
+  name: price
+  level: info
+  format: json
+
+app:
+  stop_timeout: 30s
+
+telemetry:
+  exporter: stdout
+
+pgsql:
+  write: "postgres://app:app@127.0.0.1:5432/app?sslmode=disable"
+  max_open_conns: 20
+  conn_max_lifetime: 30m
+
+redis:
+  addrs: ["127.0.0.1:6379"]
+  db: 1 # 与其它服务错开,避免最新值 key 与任务队列同库
+
+collector:
+  reload_interval: 5m
+  max_backfill_window: 720h # 30 天;更早的历史要人显式跑 backfill
+  backfill_concurrency: 2
+  kline_queue_size: 1024
+  snapshot_queue_size: 256
+
+exchanges:
+  binance:
+    enabled: true
+    ws_url: "wss://stream.binance.com:9443/stream"
+    rest_url: "https://api.binance.com"
+    max_streams_per_conn: 1024 # 已核实(2026-08-28,见 internal/price/exchange/binance/doc.go):官方文档单连接上限即 1024,与此值一致
+    rest_per_second: 10
+    rest_burst: 20
+    dial_timeout: 10s
+    reconnect_backoff_min: 1s # ws 断线重连的起始退避;过小会在交易所不可达时打成热循环
+    reconnect_backoff_max: 60s # 退避上限
+    import_quotes: ["USDT"]
+  okx:
+    enabled: true
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public" # 必须以 /public 结尾:candle 频道实际连接的 /ws/v5/business 端点由代码从这个地址替换后缀派生(见 internal/price/exchange/okx/ws.go businessWSURL),改成别的形态会导致含 K 线订阅的 Plan 报错
+    rest_url: "https://www.okx.com"
+    max_streams_per_conn: 240 # 已核实(2026-08-28,见 internal/price/exchange/okx/doc.go):官方文档未给出像 Binance 那样明确的单连接条数上限,只有 64KB 总长度/480次每小时请求数等限制;240 是按 64KB 换算出的自选保守值,未发现需要改动它的依据,保留原值
+    rest_per_second: 5
+    rest_burst: 10
+    dial_timeout: 10s
+    reconnect_backoff_min: 1s
+    reconnect_backoff_max: 60s
+    import_quotes: ["USDT"]

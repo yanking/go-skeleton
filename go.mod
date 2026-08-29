@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/XSAM/otelsql v0.43.0
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/coder/websocket v1.8.15
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/go-cmp v0.7.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0
@@ -24,6 +25,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.45.0
 	go.opentelemetry.io/otel/trace v1.45.0
 	golang.org/x/sync v0.22.0
+	golang.org/x/time v0.14.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
 	google.golang.org/grpc v1.83.1
@@ -60,5 +62,4 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.14.0 // indirect
 )

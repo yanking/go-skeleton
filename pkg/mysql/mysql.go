@@ -5,7 +5,7 @@
 // 自动路由的两条纪律，违反即报错或数据异常：
 //   - 锁读（SELECT ... FOR UPDATE）必须包进事务——路由只看操作类型、不识别
 //     锁语义，裸的锁读会被路由到只读副本上；
-//   - 写后立读要读己之写时，放进同一事务，或 db.Clauses(dbresolver.Write())
+//   - 写后立读要读己之写时，放进同一事务，或 db.Clauses(dbresolver.Write)
 //     显式走主库，否则可能撞上副本延迟。
 //
 // DB 内嵌 *gorm.DB（直接链式调用），同时实现 app.Component。连接层走 otelsql

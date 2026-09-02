@@ -45,7 +45,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `pkg/mysql` | GORM MySQL 连接池,dbresolver 自动读写分离,内嵌 `*gorm.DB` 直接调用 |
 | `pkg/pgsql` | GORM PostgreSQL(pgx stdlib)连接池,与 `pkg/mysql` 同构 |
 | `pkg/redis` | go-redis 客户端,单机/集群经 addrs 数量自动推断,内嵌 `UniversalClient` 直接调用 |
-| `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖;注入 TracerProvider 即埋出站 span 并透传 traceparent |
+| `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,连接池逐 Client 独立;注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 只留 scheme://host/path,报文不记) |
 | `pkg/transport` | 对外传输组件:gRPC 服务 + grpc-gateway 转译的 HTTP 代理出口(各占一个端口),拦截链含 errcode 出口翻译、访问日志与鉴权(otel 另经 StatsHandler 挂载),链序见包注释 |
 | `pkg/queue` | asynq 任务队列薄封装:Client 入队 + Worker 消费(实现 app.Component) |
 

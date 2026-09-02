@@ -16,7 +16,9 @@
 //
 //	client := queue.NewClient(queue.Config{Addr: "127.0.0.1:6379"})
 //	defer client.Close()
-//	client.Enqueue(ctx, "email:send", payload, queue.MaxRetry(3))
+//	client.Enqueue(ctx, "email:send", payload,
+//	    queue.MaxRetry(3), queue.TaskID("email:1"), queue.Timeout(5*time.Second))
+//	client.Cancel(ctx, "email:1") // 撤销尚未开始处理的任务
 //
 //	worker := queue.NewWorker(queue.Config{Addr: "127.0.0.1:6379", Concurrency: 10}, logger)
 //	worker.Handle("email:send", func(ctx context.Context, payload []byte) error { ... })
@@ -68,6 +70,20 @@ func ProcessIn(d time.Duration) Option {
 	return func(dst *[]asynq.Option) { *dst = append(*dst, asynq.ProcessIn(d)) }
 }
 
+// TaskID 指定任务的显式 ID，撤销（Client.Cancel）按它寻址。空串视为未指定，
+// 由 asynq 自动生成；同一 ID 在队列中所有未终结的任务间必须唯一，冲突时入队
+// 返回错误。需要撤销能力的任务方须传入。
+func TaskID(id string) Option {
+	return func(dst *[]asynq.Option) { *dst = append(*dst, asynq.TaskID(id)) }
+}
+
+// Timeout 指定单个任务的处理时长上限，超时即按失败计入重试。不指定时用 asynq
+// 的默认值 30 分钟——那对绝大多数任务都太长：一个卡住的处理函数会占着 worker
+// 名额半小时，并发数被它一点点吃掉。有外部调用的任务方都该显式给一个。
+func Timeout(d time.Duration) Option {
+	return func(dst *[]asynq.Option) { *dst = append(*dst, asynq.Timeout(d)) }
+}
+
 // options 把本包 Option 列表转换为底层 asynq.Option 列表。未导出，靠同包
 // 测试直接验证映射关系。
 func options(opts []Option) []asynq.Option {
@@ -78,9 +94,19 @@ func options(opts []Option) []asynq.Option {
 	return out
 }
 
+// defaultQueue 本包的任务队列名：Enqueue 未指定队列名，任务进 asynq 默认队列，
+// Cancel 按同名队列寻址——两侧共用此常量，改一处必须同步另一处。
+const defaultQueue = "default"
+
+// ErrTaskNotFound 撤销目标不存在：任务从未入队、已处理完成或已被撤销——
+// 已终结的任务在 Redis 里不留痕，无法与「从未存在」区分，统一按此哨兵上报。
+var ErrTaskNotFound = errors.New("任务不存在或已终结")
+
 // Client 入队客户端，并发安全，可在多个 goroutine 间共享。
 type Client struct {
 	c *asynq.Client
+	// insp 撤销用的检查器，与入队共用同一 Redis 连接参数，惰性建连。
+	insp *asynq.Inspector
 }
 
 // NewClient 按 cfg 构造入队客户端。装配期错误（校验不过）直接 panic，对齐
@@ -89,11 +115,12 @@ func NewClient(cfg Config) *Client {
 	if err := cfg.Validate(); err != nil {
 		panic(fmt.Errorf("装配 queue.Client: %w", err))
 	}
-	return &Client{c: asynq.NewClient(asynq.RedisClientOpt{
+	opt := asynq.RedisClientOpt{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
 		DB:       cfg.DB,
-	})}
+	}
+	return &Client{c: asynq.NewClient(opt), insp: asynq.NewInspector(opt)}
 }
 
 // Enqueue 把一个任务放入队列：typename 标识任务类型，payload 为原始报文，由
@@ -106,9 +133,28 @@ func (c *Client) Enqueue(ctx context.Context, typename string, payload []byte, o
 	return nil
 }
 
-// Close 关闭底层连接。
+// Cancel 撤销一个尚未开始处理的任务（含延时、待重试与死信中的），按入队时
+// TaskID 指定的 ID 寻址。任务不存在或已终结返回 ErrTaskNotFound；任务正在处理中
+// （active）时底层不支持删除，作为普通错误上抛——撤销与消费并发时会有这条窄缝，
+// 调用方重试一次通常会得到 ErrTaskNotFound 或成功。ctx 预留：底层 asynq.Inspector
+// 不收取消信号，当前不产生作用。
+func (c *Client) Cancel(ctx context.Context, taskID string) error {
+	if taskID == "" {
+		return errors.New("撤销任务: taskID 不能为空")
+	}
+	if err := c.insp.DeleteTask(defaultQueue, taskID); err != nil {
+		if errors.Is(err, asynq.ErrTaskNotFound) {
+			return fmt.Errorf("撤销任务 %s: %w", taskID, ErrTaskNotFound)
+		}
+		return fmt.Errorf("撤销任务 %s: %w", taskID, err)
+	}
+	return nil
+}
+
+// Close 关闭底层连接（入队客户端与撤销检查器一并释放）。两处都要关，失败也
+// 都要报——先返回其一会把另一处的失败吞掉，那是宪法第 1 条禁止的。
 func (c *Client) Close() error {
-	return c.c.Close()
+	return errors.Join(c.insp.Close(), c.c.Close())
 }
 
 // Worker 任务消费者，实现 app.Component：Start 启动内部处理协程，Stop 优雅

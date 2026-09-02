@@ -63,6 +63,16 @@ func TestOptions(t *testing.T) {
 			want: []asynq.Option{asynq.ProcessIn(5 * time.Second)},
 		},
 		{
+			name: "TaskID 映射",
+			opts: []Option{TaskID("email:1")},
+			want: []asynq.Option{asynq.TaskID("email:1")},
+		},
+		{
+			name: "Timeout 映射",
+			opts: []Option{Timeout(5 * time.Second)},
+			want: []asynq.Option{asynq.Timeout(5 * time.Second)},
+		},
+		{
 			name: "组合选项按传入顺序映射",
 			opts: []Option{MaxRetry(1), ProcessIn(2 * time.Second)},
 			want: []asynq.Option{asynq.MaxRetry(1), asynq.ProcessIn(2 * time.Second)},

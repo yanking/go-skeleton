@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
+	otelmetric "go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -120,6 +121,11 @@ func (t *Telemetry) Name() string { return "telemetry" }
 // TracerProvider 暴露内部 Provider，供 pkg/mysql、pkg/pgsql、pkg/redis 等
 // 依赖包在装配期做链路追踪注入。Shutdown 之后它退化为 no-op，属预期。
 func (t *Telemetry) TracerProvider() trace.TracerProvider { return t.tracer }
+
+// Meter 返回挂在进程统一 MeterProvider 上的业务指标 Meter（stdout/otlp 双导出），
+// 供业务层在装配期经注入使用（服务自定义指标不要自建 Provider，也别碰 otel 全局，
+// 与 TracerProvider 同一约定）。Shutdown 之后退化为 no-op，属预期。
+func (t *Telemetry) Meter(name string) otelmetric.Meter { return t.meter.Meter(name) }
 
 // Start 实现 app.Component：遥测没有常驻循环，Provider 已在装配期就绪。
 func (t *Telemetry) Start(context.Context) error { return nil }

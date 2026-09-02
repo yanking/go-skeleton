@@ -1,0 +1,51 @@
+# golangci-lint 配置。选的每一条都对着仓库已有的纪律,不为「多开几个」而开:
+# 宪法第 1 条(禁止吞错)与 .agents/go-style.md 硬规则 4 靠 errcheck / nilerr 守,
+# 出站与连接纪律靠 bodyclose / noctx 守。
+#
+# 例外一律写成带路径的规则而非全局关闭:一个 linter 与本仓某处的既定设计冲突,
+# 不等于它在别处没用。工具版本钉在 tools/go.mod,装到 bin/tools/,跑 make lint。
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck      # 未处理的 error——宪法第 1 条「禁止吞错」的机器判据
+    - errorlint     # %w 包装与 errors.Is/As 的正确用法(go-style 硬规则 4)
+    - nilerr        # err != nil 却返回 nil,吞错的典型形态
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose     # HTTP 响应体未关,出站客户端的连接泄漏源
+    - noctx         # 不带 ctx 的出站请求(跨调用边界必须传 ctx)
+    - copyloopvar
+    - misspell
+
+  settings:
+    errcheck:
+      # defer 收尾的 Close 拿不到有意义的处置手段,不在「吞错」之列。
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (net/http.ResponseWriter).Write
+
+  exclusions:
+    generated: strict
+    paths:
+      - gen          # protoc/buf 产物,不受本仓风格约束
+    rules:
+      # 装配期的 net.Listen 没有 ctx 语义可言(「起不来就该死」,见 pkg/transport
+      # 包注释),ListenConfig 在这里只是噪音。
+      - path: pkg/transport/server\.go
+        linters:
+          - noctx
+
+      # 测试辅助不受出站纪律约束;被测函数的返回值常按「只关心不 panic」调用。
+      - path: _test\.go
+        linters:
+          - errcheck
+          - noctx
+
+formatters:
+  enable:
+    - gofmt

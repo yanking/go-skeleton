@@ -12,7 +12,7 @@ CMDS := $(notdir $(wildcard cmd/*))
 SVC ?= $(firstword $(CMDS))
 
 .DEFAULT_GOAL := help
-.PHONY: help new-project build run vet test check fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e clean
+.PHONY: help new-project build run vet test check lint vuln fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e clean
 
 help: ## 显示帮助
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -46,6 +46,14 @@ check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
 	go test ./...
 	@drift=$$(gofmt -l .); test -z "$$drift" || { echo "$$drift"; echo ">> 存在未格式化文件,运行 make fmt"; exit 1; }
 
+# lint / vuln 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
+# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI 里各占一个 job。
+lint: tools ## golangci-lint 全量检查(linter 选取与例外见 .golangci.yml)
+	$(TOOLS_DIR)/golangci-lint run ./...
+
+vuln: tools ## 依赖漏洞扫描(govulncheck,比对 Go 官方漏洞库)
+	$(TOOLS_DIR)/govulncheck ./...
+
 fmt: ## 格式化全部 Go 代码
 	gofmt -w .
 
@@ -53,7 +61,7 @@ tidy: ## 整理依赖 go mod tidy(主 module 与 tools/ 各一次)
 	go mod tidy
 	cd $(TOOLS_MOD) && go mod tidy
 
-tools: ## 安装/更新工具链(proto + goose)到 bin/tools/(版本钉在 tools/go.mod 的 tool 段)
+tools: ## 安装/更新工具链(proto、goose、golangci-lint、govulncheck)到 bin/tools/(版本钉在 tools/go.mod 的 tool 段)
 	@mkdir -p $(TOOLS_DIR)
 	@cd $(TOOLS_MOD) && for pkg in $$(go list tool); do \
 		bin=$$(basename $$pkg); \
@@ -115,6 +123,7 @@ migrate-status: ## 查看迁移状态: make migrate-status SVC=user
 # 测试数据写入、被测服务与下游 mock 的起停。SVC 与 run 一致(自动取首个服务)。
 e2e: ## 端对端测试: make e2e SVC=<svc>(前置:本地 Postgres、grpcurl、jq)
 	@test -x test/e2e/$(SVC)/run.sh || { echo ">> 暂无 $(SVC) 的端对端测试(test/e2e/$(SVC)/run.sh 不存在)"; exit 1; }
+	@test -x "$(GOOSE)" || $(MAKE) --no-print-directory tools
 	test/e2e/$(SVC)/run.sh
 
 clean: ## 清理构建产物

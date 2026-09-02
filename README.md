@@ -44,6 +44,8 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
 （gRPC + gateway 双端口，拦截链含错误码出口翻译、访问日志、鉴权）、`queue` asynq 任务队列。
 
 `make help` 列出全部命令；`make check` 是提交门槛（build / vet / test 全绿 + gofmt 零漂移）。
+`make lint`（golangci-lint，配置见 `.golangci.yml`）与 `make vuln`（govulncheck 漏洞扫描）不并进 check——
+那会改动宪法第 5 条对门槛的定义。
 
 ## 文档
 

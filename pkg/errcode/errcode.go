@@ -4,7 +4,7 @@
 // 用法约定：
 //   - 纯业务错误（参数不合法、重名等，无底层原因）直接返回 Code 值或各服务的哨兵；
 //   - 翻译底层错误时用 Wrap 把原始错误挂到业务码上——errors.As 沿链仍能取回业务字段，
-//     errors.Is / Unwrap 仍能到达原始错误，两层信息互不丢失；
+//     errors.Is 既能命中业务哨兵、也能穿透到原始错误，两层信息互不丢失；
 //   - 原始错误只进日志，绝不拼进 Message 返回给客户端。
 package errcode
 
@@ -39,7 +39,7 @@ func (e Code) Error() string {
 }
 
 // Wrap 返回携带原始错误的业务错误：翻译底层错误时使用。
-// 之后 errors.As(err, &Code{}) 取业务字段、errors.Is / errors.Unwrap 走原始链，两个方向都通。
+// 之后 errors.As(err, &Code{}) 取业务字段，errors.Is 对业务哨兵与原始错误链都命中。
 func Wrap(cause error, ec Code) error {
 	return &wrapped{Code: ec, cause: cause}
 }
@@ -71,6 +71,14 @@ func (w *wrapped) As(target any) bool {
 		return true
 	}
 	return false
+}
+
+// Is 使 errors.Is(err, 哨兵) 对 Wrap 结果同样命中，与哨兵裸返回时的 == 语义一致：
+// 同一个业务哨兵，service 用不用 Wrap 不该改变上层能否据它分支。比较整个 Code 值
+// （码、消息、状态）——哨兵是包级变量，三者固定。
+func (w *wrapped) Is(target error) bool {
+	ec, ok := target.(Code)
+	return ok && ec == w.Code
 }
 
 // 通用错误码（10000–19999）；各服务业务码在自己的包内按分段规则另行定义。

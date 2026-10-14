@@ -69,3 +69,30 @@ func TestPlainErrCodeIsError(t *testing.T) {
 		t.Fatal("纯 Code 值未能被 errors.As 提取")
 	}
 }
+
+// TestWrapMatchesSentinelWithIs 守住：同一个业务哨兵，裸返回与 Wrap 后 errors.Is 都要命中——
+// 否则上层能否据它分支，取决于 service 有没有 Wrap，最直觉的写法会静默失效。
+func TestWrapMatchesSentinelWithIs(t *testing.T) {
+	err := Wrap(errors.New("record not found"), ErrNotFound)
+	sameCodeOtherMessage := New(ErrNotFound.Code, "另一种措辞", ErrNotFound.Status)
+
+	cases := []struct {
+		name   string
+		err    error
+		target error
+		want   bool
+	}{
+		{"Wrap 后命中同一哨兵", err, ErrNotFound, true},
+		{"再套一层 %w 仍命中", fmt.Errorf("GetUser: %w", err), ErrNotFound, true},
+		{"不命中别的业务码", err, ErrInternal, false},
+		{"码同消息不同按整个 Code 值比较，不命中", err, sameCodeOtherMessage, false},
+		{"裸哨兵自身命中（既有 == 语义）", ErrNotFound, ErrNotFound, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := errors.Is(c.err, c.target); got != c.want {
+				t.Errorf("errors.Is = %v，期望 %v", got, c.want)
+			}
+		})
+	}
+}

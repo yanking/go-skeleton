@@ -249,7 +249,7 @@ func recoverMessage(t *testing.T, fn func()) (msg string) {
 // ${VAR:-默认} 是最容易手写出来的形态，字面串成了凭证就是失败开放。
 func TestMustLoadPanicsOnMalformedEnvRef(t *testing.T) {
 	t.Setenv("CONF_TEST_X", "x")
-	for _, token := range []string{"${}", "${DB-PASSWORD}", "${CONF_TEST_X:-d}", "${1X}", "${密码}", "${${CONF_TEST_X}}"} {
+	for _, token := range []string{"${}", "${DB-PASSWORD}", "${CONF_TEST_X:-d}", "${1X}", "${密码}", "${${CONF_TEST_X}}", "${CONF_TEST_X"} {
 		t.Run(token, func(t *testing.T) {
 			msg := recoverMessage(t, func() {
 				var c envConf

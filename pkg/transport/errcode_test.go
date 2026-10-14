@@ -51,7 +51,8 @@ func TestErrDomain(t *testing.T) {
 	}
 }
 
-// TestToStatusErr 覆盖出口翻译的三路：errcode 业务码进 details 的 ErrorInfo，已是 status 的放行（故障类码只换消息），其余兜成内部错误。
+// TestToStatusErr 覆盖出口翻译的三路：errcode 业务码进 details 的 ErrorInfo，已是 status 的放行
+// （故障类码只换消息），其余兜成通用码（ctx 超时/取消为 10005/10006，其他为内部错误 10003）。
 func TestToStatusErr(t *testing.T) {
 	ec := errcode.New(40001, "渠道实例不存在", codes.NotFound)
 

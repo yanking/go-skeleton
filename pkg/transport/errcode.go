@@ -61,8 +61,8 @@ func isMajorVersion(s string) bool {
 
 // errCodeToStatus 出口层错误翻译（Unary）：errors.As 提取 errcode 业务字段——
 // Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason；
-// 已是 status 的错误放行（故障类码的消息换成通用内部错误消息）；其余错误兜成通用内部错误，
-// 原始文本不出客户端。
+// 已是 status 的错误放行（故障类码只换消息）；ctx 超时/取消兜成通用码 10005/10006；
+// 其余错误兜成通用内部错误，原始文本不出客户端。
 func errCodeToStatus(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	resp, err := handler(ctx, req)
 	if err != nil {

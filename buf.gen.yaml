@@ -1,4 +1,4 @@
-# buf 代码生成:插件走本地(go tool 安装于 GOPATH/bin),paths=source_relative
+# buf 代码生成:buf 与插件都由 make tools 装到 bin/tools/(版本钉在 tools/go.mod),paths=source_relative
 # 保持 api/<svc>/v1/x.proto → gen/<svc>/v1/x.pb.go 的目录映射。
 version: v2
 plugins:

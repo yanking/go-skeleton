@@ -1,10 +1,12 @@
 # AGENTS.md
 
 > 本文件是给 AI 助手(以及新人)的项目导航与约束入口。
-> 编码细则:@.agents/go-style.md
 
 ## 宪法
 @CONSTITUTION.md
+
+## 编码细则
+@.agents/go-style.md
 
 ## 项目定位
 

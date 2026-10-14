@@ -93,7 +93,8 @@ proto-lint: tools ## buf lint + 破坏性变更检查(基线默认为当前分�
 # 数据库迁移(goose):迁移文件按服务放 migrations/<svc>/,序号统一用 migrate-create 生成的
 # 年月日时间戳(手写小序号与其混用会打乱应用顺序)。DSN 默认从 configs/<svc>.yaml 的 pgsql.write
 # 提取(值须带引号)——服务与库天然对应;部署侧/CI 必须显式注入 MIGRATE_DSN 环境变量覆盖,防止
-# 拿仓库里的开发库地址去打生产。迁移是显式部署步骤,不挂服务启动(多副本抢跑);共库时各配 -table。
+# 拿仓库里的开发库地址去打生产。迁移是显式部署步骤,不挂服务启动(多副本抢跑);多服务共库时共用同一张
+# goose_db_version(本文件不传 -table,后果与改法见 AGENTS.md「服务分层」迁移段)。
 GOOSE       := $(TOOLS_DIR)/goose
 MIGRATE_DIR := migrations/$(SVC)
 MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null)

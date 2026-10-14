@@ -63,7 +63,8 @@ type Config struct {
 	Logger *slog.Logger `yaml:"-"`
 }
 
-// Validate 实现 conf 的校验钩子，缺 DSN、池参数为负在绑定阶段即报错。
+// Validate 实现 conf 的校验钩子：缺 DSN、池参数为负即报错。New 必调（装配期）；
+// 要提前到绑定阶段，由服务 Config 的 Validate 委托到此（conf 只调顶层）。
 func (c Config) Validate() error {
 	if c.Write == "" {
 		return errors.New("write DSN 不能为空")

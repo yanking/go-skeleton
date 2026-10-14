@@ -64,8 +64,8 @@ type Config struct {
 	Insecure bool `yaml:"insecure"`
 }
 
-// Validate 实现 conf 的校验钩子：otlp 未配 endpoint 在绑定阶段即报错，
-// 不拖到进程拉起后。
+// Validate 实现 conf 的校验钩子：otlp 未配 endpoint 即报错。New 必调（装配期）；
+// 要提前到绑定阶段，由服务 Config 的 Validate 委托到此（conf 只调顶层）。
 func (c Config) Validate() error {
 	if c.Exporter == ExporterOTLP && c.Endpoint == "" {
 		return errors.New("exporter 为 otlp 时必须配置 endpoint")

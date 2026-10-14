@@ -113,7 +113,7 @@ subst CONSTITUTION.md -e "1s#.*#\# ${name} 项目宪法#"
 subst Makefile -e "1s#.*#\# ${name} 开发常用命令。#"
 subst .agents/skills/new-service/SKILL.md -e "s#在 go-skeleton 仓库新增微服务#在 ${name} 仓库新增微服务#"
 subst .agents/skills/new-service/assets/openapi/docs.html -e "s#go-skeleton API 文档#${name} API 文档#g"
-# 派生项目不再是模板仓:定位改写,分支约定去掉 template 一行。
+# 派生项目不再是模板仓:定位改写,分支约定表改写为 main / feature 两行(去掉 example)。
 subst AGENTS.md \
 	-e "s#^它首先是\*\*模板仓库\*\*.*#本仓基于 go-skeleton 模板骨架起步。模板层(\`pkg/\`、\`Makefile\`、\`.agents/\`)的改动仍要经得起一个问题——\"这个模式复制到第 10 个服务时还成立吗?\"#" \
 	-e "/^拿本仓起新项目用/d" # 派生项目不是模板仓,这条动线不再适用(new-project 技能留着,跑到会自己拒绝)

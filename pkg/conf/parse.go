@@ -37,7 +37,7 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // MustLoad 读取 YAML 配置文件 configFile，展开 ${NAME} 环境变量引用后绑定到 obj（必须是指针）。
 // 文件中出现 obj 之外的未知键视为错误，以尽早暴露键名拼写问题。
-// 若 obj 实现 Validate() error 则在绑定后调用。任何失败直接 panic。
+// 若 obj 实现 Validate() error 则在绑定后调用——只调顶层 obj，嵌入的子 Config 须由顶层显式委托。任何失败直接 panic。
 func MustLoad(configFile string, obj any) {
 	data, err := os.ReadFile(configFile)
 	if err != nil {

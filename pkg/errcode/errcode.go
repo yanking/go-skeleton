@@ -4,7 +4,7 @@
 // 用法约定：
 //   - 纯业务错误（参数不合法、重名等，无底层原因）直接返回 Code 值或各服务的哨兵；
 //   - 翻译底层错误时用 Wrap 把原始错误挂到业务码上——errors.As 沿链仍能取回业务字段，
-//     errors.Is / Unwrap 仍能到达原始错误，两层信息互不丢失；
+//     errors.Is 既能命中业务哨兵、也能穿透到原始错误，两层信息互不丢失；
 //   - 原始错误只进日志，绝不拼进 Message 返回给客户端。
 package errcode
 
@@ -39,12 +39,12 @@ func (e Code) Error() string {
 }
 
 // Wrap 返回携带原始错误的业务错误：翻译底层错误时使用。
-// 之后 errors.As(err, &Code{}) 取业务字段、errors.Is / errors.Unwrap 走原始链，两个方向都通。
+// 之后 errors.As(err, &Code{}) 取业务字段，errors.Is 对业务哨兵与原始错误链都命中。
 func Wrap(cause error, ec Code) error {
 	return &wrapped{Code: ec, cause: cause}
 }
 
-// wrapped 是 Wrap 的返回类型，unexported：调用方只应通过 errors.As / Unwrap 观察，
+// wrapped 是 Wrap 的返回类型，unexported：调用方只应通过 errors.Is / errors.As / Unwrap 观察，
 // 不依赖具体类型，以便将来调整实现。
 type wrapped struct {
 	Code
@@ -59,7 +59,8 @@ func (w *wrapped) Error() string {
 	return fmt.Sprintf("code=%d message=%s cause=%v", ec.Code, ec.Message, w.cause)
 }
 
-// Unwrap 打通原始错误链：errors.Is(err, 哨兵) 与日志里的 cause 都依赖它。
+// Unwrap 打通原始错误链：errors.Is 对原始链上的哨兵（如 gorm.ErrRecordNotFound）命中
+// 与日志里的 cause 都依赖它；业务哨兵的命中由 Is 负责。
 func (w *wrapped) Unwrap() error { return w.cause }
 
 // As 使 errors.As(err, &Code{}) 能提取业务字段。
@@ -73,10 +74,20 @@ func (w *wrapped) As(target any) bool {
 	return false
 }
 
+// Is 使 errors.Is(err, 哨兵) 对 Wrap 结果同样命中，与哨兵裸返回时的 == 语义一致：
+// 同一个业务哨兵，service 用不用 Wrap 不该改变上层能否据它分支。比较整个 Code 值
+// （码、消息、状态）——哨兵是包级变量，三者固定。
+func (w *wrapped) Is(target error) bool {
+	ec, ok := target.(Code)
+	return ok && ec == w.Code
+}
+
 // 通用错误码（10000–19999）；各服务业务码在自己的包内按分段规则另行定义。
 var (
 	ErrInvalidParameter = New(10001, "参数错误", codes.InvalidArgument)
 	ErrNotFound         = New(10002, "资源不存在", codes.NotFound)
 	ErrInternal         = New(10003, "内部错误", codes.Internal)
 	ErrUnauthenticated  = New(10004, "未认证", codes.Unauthenticated)
+	ErrDeadlineExceeded = New(10005, "请求超时", codes.DeadlineExceeded)
+	ErrCanceled         = New(10006, "请求已取消", codes.Canceled)
 )

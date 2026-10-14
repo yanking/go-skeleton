@@ -33,7 +33,7 @@ make new-project MODULE=github.com/acme/acme-pay [NAME=acme-pay]
 
 1. 换 module path（`go.mod`、`tools/go.mod`、全部 `.go` 与技能模板 `.tpl`），随后 `gofmt -w .`
 2. 抹掉模板身份：`CONSTITUTION.md` 标题、`Makefile` 首行、`AGENTS.md` 项目定位与分支约定表
-   （去掉 `template` 一行，派生项目不再是模板仓）、`new-service` 技能描述、`/docs` 页标题
+   （改写为 main / feature 两行，去掉 `example` 示例分支，派生项目不再是模板仓）、`new-service` 技能描述、`/docs` 页标题
 3. 生成 `README.md`
 4. `make check` 自检
 5. `rm -rf .git` → `git init -b main` → 首提交，并把原 `origin` 挂成 `upstream`

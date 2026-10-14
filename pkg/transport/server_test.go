@@ -151,6 +151,29 @@ func TestServerDualProtocol(t *testing.T) {
 			t.Errorf("原始错误不得外泄, got %q", body)
 		}
 	})
+
+	// 漏翻译的裸错误经 gateway：出口兜成通用内部错误，HTTP 500 + {"code":10003,"message":"内部错误"}，
+	// 拨号详情绝不外泄——gateway 路径是唯一会再做一次 status.Convert 的地方，须单独钉住。
+	t.Run("裸错误经 gateway 兜成内部错误", func(t *testing.T) {
+		code, body := get(t, base+"/v1/boom")
+		if code != http.StatusInternalServerError {
+			t.Errorf("状态 got %d, want 500 (body %q)", code, body)
+		}
+		var got struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("body 非 JSON: %q", body)
+		}
+		if got.Code != errcode.ErrInternal.Code || got.Message != errcode.ErrInternal.Message {
+			t.Errorf("JSON got %+v, want code=%d message=%q",
+				got, errcode.ErrInternal.Code, errcode.ErrInternal.Message)
+		}
+		if strings.Contains(body, "10.0.0.5") {
+			t.Errorf("原始错误不得外泄, got %q", body)
+		}
+	})
 }
 
 // 鉴权对两种协议同时生效：HTTP 的 Authorization 头经 gateway 转成 metadata，
@@ -224,7 +247,9 @@ func TestClosedOnStop(t *testing.T) {
 const (
 	echoPing = "/test.v1.Echo/Ping"
 	echoFail = "/test.v1.Echo/Fail"
+	echoBoom = "/test.v1.Echo/Boom"
 	cause    = "底层连接失败"
+	rawCause = "dial tcp 10.0.0.5:5432: connection refused"
 )
 
 var echoDesc = grpc.ServiceDesc{
@@ -233,6 +258,8 @@ var echoDesc = grpc.ServiceDesc{
 	Methods: []grpc.MethodDesc{
 		{MethodName: "Ping", Handler: echoHandler(echoPing, nil)},
 		{MethodName: "Fail", Handler: echoHandler(echoFail, errcode.Wrap(errors.New(cause), errcode.ErrNotFound))},
+		// Boom 模拟漏翻译：handler 把带主机地址的裸错误原样返回。
+		{MethodName: "Boom", Handler: echoHandler(echoBoom, errors.New(rawCause))},
 	},
 	Metadata: "test/v1/echo.proto",
 }
@@ -286,7 +313,10 @@ func echoGateway(_ context.Context, mux *runtime.ServeMux, conn *grpc.ClientConn
 	if err := route("/v1/ping", echoPing); err != nil {
 		return err
 	}
-	return route("/v1/fail", echoFail)
+	if err := route("/v1/fail", echoFail); err != nil {
+		return err
+	}
+	return route("/v1/boom", echoBoom)
 }
 
 // ---- 测试工具 ----

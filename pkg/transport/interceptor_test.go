@@ -11,7 +11,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 
 	"github.com/yanking/go-skeleton/pkg/errcode"
 )
@@ -64,7 +63,8 @@ func TestFixedBearerAuthEmptyToken(t *testing.T) {
 }
 
 // TestAccessLogFields 守住访问日志的字段契约：成功与失败都带 code，
-// 否则按 code 做检索、告警与成功率 SLI 时成功请求会整批漏掉。
+// 否则按 code 做检索、告警与成功率 SLI 时成功请求会整批漏掉；
+// code 记的是出口翻译后线上实际发出的码，否则日志里分不开客户端取消与服务端故障。
 func TestAccessLogFields(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -72,7 +72,9 @@ func TestAccessLogFields(t *testing.T) {
 		wantCode string
 	}{
 		{"成功", nil, "OK"},
-		{"失败", errcode.ErrNotFound, "Unknown"},
+		{"errcode 记线上实际发出的码", errcode.ErrNotFound, "NotFound"},
+		{"裸错误记兜底后的码", errors.New("boom"), "Internal"},
+		{"ctx 取消记 Canceled", context.Canceled, "Canceled"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -183,7 +185,8 @@ func TestUnaryAccessLog(t *testing.T) {
 			t.Fatal("want error")
 		}
 		out := buf.String()
-		if !strings.Contains(out, "level=WARN") || !strings.Contains(out, status.Code(errcode.ErrNotFound).String()) {
+		// code 记的是线上实际发出的码（errcode 的 Status），不是翻译前对裸 errcode 取 status.Code 得到的 Unknown。
+		if !strings.Contains(out, "level=WARN") || !strings.Contains(out, errcode.ErrNotFound.Status.String()) {
 			t.Errorf("失败日志不符, got %q", out)
 		}
 	})

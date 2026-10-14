@@ -3,8 +3,10 @@ package conf_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -164,5 +166,98 @@ func TestMustLoadValidateOK(t *testing.T) {
 	conf.MustLoad(writeFile(t, "name: user\n"), &got)
 	if want := "user"; got.Name != want {
 		t.Errorf("Name = %q, want %q", got.Name, want)
+	}
+}
+
+// envConf 覆盖字符串与整型两种目标：展开是纯文本替换，数字也能从环境变量来。
+type envConf struct {
+	Password string `yaml:"password"`
+	Port     int    `yaml:"port"`
+	Literal  string `yaml:"literal"`
+}
+
+// TestMustLoadExpandsEnv 守住 ${NAME} 的展开规则：带引号的值里含 YAML 特殊字符也安全，
+// 已设置为空串的变量照常展开，$NAME 形式原样保留。
+func TestMustLoadExpandsEnv(t *testing.T) {
+	t.Setenv("CONF_TEST_PASSWORD", "s3cret:#x")
+	t.Setenv("CONF_TEST_PORT", "9090")
+	t.Setenv("CONF_TEST_EMPTY", "")
+
+	tests := []struct {
+		name string
+		yaml string
+		want envConf
+	}{
+		{
+			name: "带引号的字符串与裸数字都展开",
+			yaml: "password: \"${CONF_TEST_PASSWORD}\"\nport: ${CONF_TEST_PORT}\n",
+			want: envConf{Password: "s3cret:#x", Port: 9090},
+		},
+		{
+			name: "已设置为空串的变量展开成空串而非 panic",
+			yaml: "password: \"${CONF_TEST_EMPTY}\"\n",
+			want: envConf{},
+		},
+		{
+			name: "不带花括号的 $NAME 原样保留",
+			yaml: "literal: \"$CONF_TEST_PASSWORD\"\n",
+			want: envConf{Literal: "$CONF_TEST_PASSWORD"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got envConf
+			conf.MustLoad(writeFile(t, tt.yaml), &got)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("配置不符 (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMustLoadPanicsOnUnsetEnv 守住失败关闭：未设置的变量不能静默展开成空串——
+// 那等于把「漏配」伪装成「配了个空值」，凭证类字段最危险的形态；panic 信息须点名变量。
+func TestMustLoadPanicsOnUnsetEnv(t *testing.T) {
+	var c envConf
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("未设置的环境变量应 panic，实际正常返回")
+		}
+		if !strings.Contains(fmt.Sprint(r), "CONF_TEST_UNSET_VAR") {
+			t.Fatalf("panic 信息未点名变量: %v", r)
+		}
+	}()
+	conf.MustLoad(writeFile(t, "password: \"${CONF_TEST_UNSET_VAR}\"\n"), &c)
+}
+
+// recoverMessage 跑 fn 并返回其 panic 信息；不 panic 即失败。
+func recoverMessage(t *testing.T, fn func()) (msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("期望 panic，实际正常返回")
+		}
+		msg = fmt.Sprint(r)
+	}()
+	fn()
+	return ""
+}
+
+// TestMustLoadPanicsOnMalformedEnvRef 守住：写错的 ${...} 不能静默当字面量放行——
+// ${VAR:-默认} 是最容易手写出来的形态，字面串成了凭证就是失败开放。
+func TestMustLoadPanicsOnMalformedEnvRef(t *testing.T) {
+	t.Setenv("CONF_TEST_X", "x")
+	for _, token := range []string{"${}", "${DB-PASSWORD}", "${CONF_TEST_X:-d}", "${1X}", "${密码}", "${${CONF_TEST_X}}", "${CONF_TEST_X"} {
+		t.Run(token, func(t *testing.T) {
+			msg := recoverMessage(t, func() {
+				var c envConf
+				conf.MustLoad(writeFile(t, "password: \""+token+"\"\n"), &c)
+			})
+			if !strings.Contains(msg, "不合文法") {
+				t.Errorf("panic 信息未指出记号不合文法: %s", msg)
+			}
+		})
 	}
 }

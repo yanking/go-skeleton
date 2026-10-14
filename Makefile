@@ -47,7 +47,7 @@ check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
 	@drift=$$(gofmt -l .); test -z "$$drift" || { echo "$$drift"; echo ">> 存在未格式化文件,运行 make fmt"; exit 1; }
 
 # lint / vuln 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
-# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI 里各占一个 job。
+# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI(.github/workflows/ci.yml)里各占一个 job。
 lint: tools ## golangci-lint 全量检查(linter 选取与例外见 .golangci.yml)
 	$(TOOLS_DIR)/golangci-lint run ./...
 
@@ -61,7 +61,7 @@ tidy: ## 整理依赖 go mod tidy(主 module 与 tools/ 各一次)
 	go mod tidy
 	cd $(TOOLS_MOD) && go mod tidy
 
-tools: ## 安装/更新工具链(proto、goose、golangci-lint、govulncheck)到 bin/tools/(版本钉在 tools/go.mod 的 tool 段)
+tools: ## 安装/更新工具链(buf、proto 插件、goose、golangci-lint、govulncheck)到 bin/tools/(版本钉在 tools/go.mod 的 tool 段)
 	@mkdir -p $(TOOLS_DIR)
 	@cd $(TOOLS_MOD) && for pkg in $$(go list tool); do \
 		bin=$$(basename $$pkg); \
@@ -69,22 +69,22 @@ tools: ## 安装/更新工具链(proto、goose、golangci-lint、govulncheck)到
 		GOBIN=$(TOOLS_DIR) go install "$$pkg" || exit 1; \
 	done
 
-# TOOLS_DIR 放 PATH 最前:项目钉的版本优先于 GOPATH/bin 里可能存在的旧插件。
+# TOOLS_DIR 放 PATH 最前:buf 按名字从 PATH 找 protoc 插件,项目钉的版本优先于 GOPATH/bin 里可能存在的旧插件。
 proto: tools ## 从 api/ 生成 pb、gRPC stub、gateway 与 OpenAPI v3 spec(buf)
 	@ls api/*/ >/dev/null 2>&1 || { echo ">> api/ 下还没有契约:按 AGENTS.md「服务开发流程」先写 proto"; exit 1; }
-	PATH="$(TOOLS_DIR):$$PATH" buf generate api
+	PATH="$(TOOLS_DIR):$$PATH" $(TOOLS_DIR)/buf generate api
 
 # 破坏性变更的比较基线:契约「已发布」的那一版,即当前分支自己的远端。
 # 不写死 origin/main——本仓的 main 是纯模板层、根本没有 api/,拿它当基线会得到
 # 「一切都是新增、永远不算破坏」的假通过。基线缺失时宁可跳过并说明,也不给假绿。
 BREAKING_BASE ?= origin/$(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
 
-proto-lint: ## buf lint + 破坏性变更检查(基线默认为当前分支的远端,可用 BREAKING_BASE 覆盖)
+proto-lint: tools ## buf lint + 破坏性变更检查(基线默认为当前分支的远端,可用 BREAKING_BASE 覆盖)
 	@ls api/*/ >/dev/null 2>&1 || { echo ">> api/ 下还没有契约,无可检查"; exit 1; }
-	buf lint
+	$(TOOLS_DIR)/buf lint
 	@if git rev-parse --verify --quiet '$(BREAKING_BASE)' >/dev/null; then \
 		echo ">> 破坏性变更检查基线: $(BREAKING_BASE)"; \
-		buf breaking --against '.git#branch=$(BREAKING_BASE)'; \
+		$(TOOLS_DIR)/buf breaking --against '.git#branch=$(BREAKING_BASE)'; \
 	else \
 		echo ">> 基线 $(BREAKING_BASE) 不存在(分支尚未推送),跳过破坏性变更检查;"; \
 		echo ">> 要比对别的基线: make proto-lint BREAKING_BASE=origin/<分支>"; \
@@ -93,7 +93,8 @@ proto-lint: ## buf lint + 破坏性变更检查(基线默认为当前分支的�
 # 数据库迁移(goose):迁移文件按服务放 migrations/<svc>/,序号统一用 migrate-create 生成的
 # 年月日时间戳(手写小序号与其混用会打乱应用顺序)。DSN 默认从 configs/<svc>.yaml 的 pgsql.write
 # 提取(值须带引号)——服务与库天然对应;部署侧/CI 必须显式注入 MIGRATE_DSN 环境变量覆盖,防止
-# 拿仓库里的开发库地址去打生产。迁移是显式部署步骤,不挂服务启动(多副本抢跑);共库时各配 -table。
+# 拿仓库里的开发库地址去打生产。迁移是显式部署步骤,不挂服务启动(多副本抢跑);多服务共库时共用同一张
+# goose_db_version(本文件不传 -table,后果与改法见 AGENTS.md「服务分层」迁移段)。
 GOOSE       := $(TOOLS_DIR)/goose
 MIGRATE_DIR := migrations/$(SVC)
 MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null)

@@ -61,7 +61,8 @@ func isMajorVersion(s string) bool {
 
 // errCodeToStatus 出口层错误翻译（Unary）：errors.As 提取 errcode 业务字段——
 // Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason；
-// 非 errcode 错误原样放行，交由 gRPC 默认语义。
+// 已是 status 的错误放行（故障类码只换消息）；ctx 超时/取消不论裸 ctx 还是 status 形态都兜成通用码 10005/10006；
+// 其余错误兜成通用内部错误，原始文本不出客户端。
 func errCodeToStatus(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	resp, err := handler(ctx, req)
 	if err != nil {
@@ -75,12 +76,63 @@ func errCodeToStatusStream(srv any, ss grpc.ServerStream, _ *grpc.StreamServerIn
 	return toStatusErr(handler(srv, ss))
 }
 
-// toStatusErr 做实际翻译：errcode → status（业务码进 details），其余原样返回。
+// toStatusErr 做实际翻译，按错误来源分三路：
+//   - errcode（含 Wrap 结果）→ status，业务码进 details；
+//   - 已是 status 的错误（handler 有意构造的、或下游 gRPC 调用原样带回的）→ 取链上第一个
+//     GRPCStatus 实现（errors.As 语义，即最外层）放行，外层 %w 加的上下文文本只进日志；
+//     DeadlineExceeded/Canceled 例外，同 ctx 形态兜成通用码 10005/10006；
+//     故障类码的消息经 scrubFault 换成通用内部错误消息，码与 details 保留；
+//   - 其余一律兜成通用内部错误：原始文本可能带 SQL、主机名，不能出客户端（宪法第 2 条），
+//     出口层不能指望每一层都记得翻译。ctx 超时/取消保留其语义码（各有通用码 10005/10006），
+//     客户端据此决定是否重试。
 func toStatusErr(err error) error {
-	var ec errcode.Code
-	if !errors.As(err, &ec) {
-		return err
+	if err == nil {
+		return nil
 	}
+	var ec errcode.Code
+	if errors.As(err, &ec) {
+		return statusFromCode(ec)
+	}
+	var gs interface{ GRPCStatus() *status.Status }
+	if errors.As(err, &gs) {
+		// GRPCStatus 返回 nil 或 OK 的实现，其 Err() 会给 nil——错误变成功，照样兜成内部错误。
+		if st := gs.GRPCStatus(); st != nil && st.Code() != codes.OK {
+			// 下游 gRPC 调用带回的超时/取消是 status 形态，与裸 ctx 错误是同一故障，
+			// 走同一通用码——否则同一故障两种契约，客户端按 code 做重试决策会把超时当内部错误。
+			switch st.Code() {
+			case codes.DeadlineExceeded:
+				return statusFromCode(errcode.ErrDeadlineExceeded)
+			case codes.Canceled:
+				return statusFromCode(errcode.ErrCanceled)
+			}
+			return scrubFault(st).Err()
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return statusFromCode(errcode.ErrDeadlineExceeded)
+	case errors.Is(err, context.Canceled):
+		return statusFromCode(errcode.ErrCanceled)
+	}
+	return statusFromCode(errcode.ErrInternal)
+}
+
+// scrubFault 把故障类状态码（Unknown、Internal、Unavailable、DataLoss）的消息换成通用内部
+// 错误消息：这类 status 多由 gRPC 客户端库在调下游失败时生成（如 Unavailable 带
+// dial tcp 10.x 的拨号详情），service 漏翻译就会原样出去；码与 details 保留，重试语义
+// 不变。客户端类码（NotFound、PermissionDenied 等）的消息是对方有意给用户看的，原样放行。
+func scrubFault(st *status.Status) *status.Status {
+	switch st.Code() {
+	case codes.Unknown, codes.Internal, codes.Unavailable, codes.DataLoss:
+		p := st.Proto()
+		p.Message = errcode.ErrInternal.Message
+		return status.FromProto(p)
+	}
+	return st
+}
+
+// statusFromCode 把业务错误码翻成 status：Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason。
+func statusFromCode(ec errcode.Code) error {
 	// Status 漏填时 codes.Code 的零值就是 codes.OK，而 OK 状态的 Err() 返回 nil——
 	// 照直翻译会把业务错误吞成「成功」，是宪法第 1 条禁止的吞错，且客户端毫无察觉。
 	// 兜成 Unknown：业务码照样进 details，调用方至少知道这是个错误。

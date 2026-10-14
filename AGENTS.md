@@ -1,10 +1,12 @@
 # AGENTS.md
 
 > 本文件是给 AI 助手(以及新人)的项目导航与约束入口。
-> 编码细则:@.agents/go-style.md
 
 ## 宪法
 @CONSTITUTION.md
+
+## 编码细则
+@.agents/go-style.md
 
 ## 项目定位
 
@@ -38,7 +40,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | 包 | 职责 |
 |---|---|
 | `pkg/app` | 组件生命周期编排:按注册顺序拉起、逆序停止 |
-| `pkg/conf` | YAML 配置加载与绑定校验 |
+| `pkg/conf` | YAML 配置加载与绑定校验;`${NAME}` 引用在解析前从环境变量展开,未设置或写法不合文法即 panic |
 | `pkg/log` | 构造统一 slog.Logger,支持从 ctx 提取 trace_id 等字段 |
 | `pkg/errcode` | 业务错误码与错误的「双通道」封装 |
 | `pkg/telemetry` | OTel 链路追踪与指标一键装配,stdout/otlp 双导出,含运行时指标 |
@@ -55,13 +57,13 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 不变量见宪法第 1、2 条;双通道封装(业务字段给客户端、原始错误链只进日志)与用法约定见 `pkg/errcode` 包注释。
 
-逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染)。每层只翻译相邻下层的错误。
+逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染);漏翻译的原始错误(非 errcode 也非 status)在出口兜成通用内部错误 10003(ctx 超时/取消分别兜成 10005/10006),原文只进日志;status 错误放行(DeadlineExceeded/Canceled 例外,同 ctx 超时/取消兜成 10005/10006),但故障类码(Unknown/Internal/Unavailable/DataLoss)的消息换成通用内部错误消息——这是兜底,不是许可。每层只翻译相邻下层的错误。
 
 错误码分段(新服务在此登记):
 
 | 分段 | 归属 |
 |---|---|
-| 10000–19999 | `pkg/errcode` 通用码(已用:10001 参数错误、10002 资源不存在、10003 内部错误、10004 未认证) |
+| 10000–19999 | `pkg/errcode` 通用码(已用:10001 参数错误、10002 资源不存在、10003 内部错误、10004 未认证、10005 请求超时、10006 请求已取消) |
 | 40000–49999 | channel(已用:40001 渠道实例不存在、40002 下游渠道请求失败、40003 回调验签失败、40004 回调状态未知、40005 渠道响应解析失败) |
 | 50000–59999 | payment(已用:50001 商户订单号重复、50002 金额超限、50003 指定渠道未绑定或不可用、50004 无可用渠道、50005 订单状态冲突、50006 商户状态受限) |
 
@@ -75,7 +77,7 @@ gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成
 
 接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。
 
-数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
+数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 
 ## 服务开发流程(从零加一个服务的动线)
 

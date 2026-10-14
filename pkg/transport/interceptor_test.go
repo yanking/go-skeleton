@@ -74,6 +74,7 @@ func TestAccessLogFields(t *testing.T) {
 		{"成功", nil, "OK"},
 		{"errcode 记线上实际发出的码", errcode.ErrNotFound, "NotFound"},
 		{"裸错误记兜底后的码", errors.New("boom"), "Internal"},
+		{"ctx 取消记 Canceled", context.Canceled, "Canceled"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

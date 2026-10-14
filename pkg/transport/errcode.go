@@ -61,7 +61,7 @@ func isMajorVersion(s string) bool {
 
 // errCodeToStatus 出口层错误翻译（Unary）：errors.As 提取 errcode 业务字段——
 // Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason；
-// 已是 status 的错误放行（故障类码只换消息）；ctx 超时/取消兜成通用码 10005/10006；
+// 已是 status 的错误放行（故障类码只换消息）；ctx 超时/取消不论裸 ctx 还是 status 形态都兜成通用码 10005/10006；
 // 其余错误兜成通用内部错误，原始文本不出客户端。
 func errCodeToStatus(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	resp, err := handler(ctx, req)
@@ -80,6 +80,7 @@ func errCodeToStatusStream(srv any, ss grpc.ServerStream, _ *grpc.StreamServerIn
 //   - errcode（含 Wrap 结果）→ status，业务码进 details；
 //   - 已是 status 的错误（handler 有意构造的、或下游 gRPC 调用原样带回的）→ 取链上第一个
 //     GRPCStatus 实现（errors.As 语义，即最外层）放行，外层 %w 加的上下文文本只进日志；
+//     DeadlineExceeded/Canceled 例外，同 ctx 形态兜成通用码 10005/10006；
 //     故障类码的消息经 scrubFault 换成通用内部错误消息，码与 details 保留；
 //   - 其余一律兜成通用内部错误：原始文本可能带 SQL、主机名，不能出客户端（宪法第 2 条），
 //     出口层不能指望每一层都记得翻译。ctx 超时/取消保留其语义码（各有通用码 10005/10006），

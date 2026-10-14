@@ -57,7 +57,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 不变量见宪法第 1、2 条;双通道封装(业务字段给客户端、原始错误链只进日志)与用法约定见 `pkg/errcode` 包注释。
 
-逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染);漏翻译的原始错误(非 errcode 也非 status)在出口兜成通用内部错误 10003(ctx 超时/取消分别兜成 10005/10006),原文只进日志;status 错误放行,但故障类码(Unknown/Internal/Unavailable/DataLoss)的消息换成通用内部错误消息——这是兜底,不是许可。每层只翻译相邻下层的错误。
+逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染);漏翻译的原始错误(非 errcode 也非 status)在出口兜成通用内部错误 10003(ctx 超时/取消分别兜成 10005/10006),原文只进日志;status 错误放行(DeadlineExceeded/Canceled 例外,同 ctx 超时/取消兜成 10005/10006),但故障类码(Unknown/Internal/Unavailable/DataLoss)的消息换成通用内部错误消息——这是兜底,不是许可。每层只翻译相邻下层的错误。
 
 错误码分段(新服务在此登记):
 

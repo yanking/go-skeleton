@@ -51,7 +51,7 @@ func TestErrDomain(t *testing.T) {
 	}
 }
 
-// TestToStatusErr 覆盖出口翻译的三路：errcode 业务码进 details 的 ErrorInfo，已是 status 的原样放行，其余兜成内部错误。
+// TestToStatusErr 覆盖出口翻译的三路：errcode 业务码进 details 的 ErrorInfo，已是 status 的放行（故障类码只换消息），其余兜成内部错误。
 func TestToStatusErr(t *testing.T) {
 	ec := errcode.New(40001, "渠道实例不存在", codes.NotFound)
 
@@ -135,7 +135,7 @@ func TestToStatusErr(t *testing.T) {
 		}
 	})
 
-	t.Run("status 错误取最内层原样放行，外层包装文本不出客户端", func(t *testing.T) {
+	t.Run("客户端类 status 原样放行，外层包装文本不出客户端", func(t *testing.T) {
 		inner := status.Error(codes.PermissionDenied, "无权访问")
 		st, ok := status.FromError(toStatusErr(fmt.Errorf("校验 10.0.0.5: %w", inner)))
 		if !ok {
@@ -143,6 +143,33 @@ func TestToStatusErr(t *testing.T) {
 		}
 		if st.Code() != codes.PermissionDenied || st.Message() != "无权访问" {
 			t.Errorf("status = %v %q，期望 PermissionDenied 无权访问", st.Code(), st.Message())
+		}
+	})
+
+	t.Run("故障类 status 只换消息，码与 details 保留", func(t *testing.T) {
+		// Unavailable 是下游不可达时 gRPC 客户端库生成的码，消息带拨号详情；Unknown 是下游漏翻译时
+		// gRPC 默认给的码，消息就是原始错误文本——四个故障类码的消息都不能带出去。
+		for _, code := range []codes.Code{codes.Unknown, codes.Internal, codes.Unavailable, codes.DataLoss} {
+			raw := status.New(code, `connection error: desc = "transport: Error while dialing: dial tcp 10.0.0.5:50051: connect: connection refused"`)
+			withInfo, err := raw.WithDetails(&errdetails.ErrorInfo{Reason: "7", Domain: "downstream"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := status.Convert(toStatusErr(fmt.Errorf("查询用户: %w", withInfo.Err())))
+			if st.Code() != code {
+				t.Errorf("%v: status code = %v，期望保留", code, st.Code())
+			}
+			if st.Message() != errcode.ErrInternal.Message || strings.Contains(st.Message(), "10.0.0.5") {
+				t.Errorf("%v: message = %q，期望换成通用内部错误消息", code, st.Message())
+			}
+			details := st.Details()
+			if len(details) != 1 {
+				t.Errorf("%v: details 条数 = %d，期望保留 1 条", code, len(details))
+				continue
+			}
+			if info, ok := details[0].(*errdetails.ErrorInfo); !ok || info.GetReason() != "7" {
+				t.Errorf("%v: details[0] = %v，期望保留下游原 ErrorInfo（Reason \"7\"）", code, details[0])
+			}
 		}
 	})
 
@@ -167,17 +194,29 @@ func TestToStatusErr(t *testing.T) {
 		cases := []struct {
 			in   error
 			want codes.Code
+			ec   errcode.Code
 		}{
-			{fmt.Errorf("查询 10.0.0.5: %w", context.DeadlineExceeded), codes.DeadlineExceeded},
-			{fmt.Errorf("查询 10.0.0.5: %w", context.Canceled), codes.Canceled},
+			{fmt.Errorf("查询 10.0.0.5: %w", context.DeadlineExceeded), codes.DeadlineExceeded, errcode.ErrDeadlineExceeded},
+			{fmt.Errorf("查询 10.0.0.5: %w", context.Canceled), codes.Canceled, errcode.ErrCanceled},
 		}
 		for _, c := range cases {
 			st := status.Convert(toStatusErr(c.in))
 			if st.Code() != c.want {
 				t.Errorf("toStatusErr(%v) code = %v，期望 %v", c.in, st.Code(), c.want)
 			}
+			if st.Message() != c.ec.Message {
+				t.Errorf("toStatusErr(%v) message = %q，期望通用码消息 %q", c.in, st.Message(), c.ec.Message)
+			}
 			if strings.Contains(st.Message(), "10.0.0.5") {
 				t.Errorf("ctx 错误的包装文本泄漏进了客户端消息: %q", st.Message())
+			}
+			details := st.Details()
+			if len(details) != 1 {
+				t.Errorf("toStatusErr(%v) details 条数 = %d，期望 1", c.in, len(details))
+				continue
+			}
+			if info, ok := details[0].(*errdetails.ErrorInfo); !ok || info.GetReason() != strconv.Itoa(c.ec.Code) {
+				t.Errorf("toStatusErr(%v) details[0] = %v，期望 Reason 为通用码 %d", c.in, details[0], c.ec.Code)
 			}
 		}
 	})

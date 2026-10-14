@@ -87,4 +87,6 @@ var (
 	ErrNotFound         = New(10002, "资源不存在", codes.NotFound)
 	ErrInternal         = New(10003, "内部错误", codes.Internal)
 	ErrUnauthenticated  = New(10004, "未认证", codes.Unauthenticated)
+	ErrDeadlineExceeded = New(10005, "请求超时", codes.DeadlineExceeded)
+	ErrCanceled         = New(10006, "请求已取消", codes.Canceled)
 )

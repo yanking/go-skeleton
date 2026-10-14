@@ -199,6 +199,9 @@ func TestToStatusErr(t *testing.T) {
 		}{
 			{fmt.Errorf("查询 10.0.0.5: %w", context.DeadlineExceeded), codes.DeadlineExceeded, errcode.ErrDeadlineExceeded},
 			{fmt.Errorf("查询 10.0.0.5: %w", context.Canceled), codes.Canceled, errcode.ErrCanceled},
+			// 下游 gRPC 调用带回的 status 形态与裸 ctx 错误是同一故障，也走同一通用码。
+			{fmt.Errorf("调下游 10.0.0.5: %w", status.Error(codes.DeadlineExceeded, "context deadline exceeded")), codes.DeadlineExceeded, errcode.ErrDeadlineExceeded},
+			{status.Error(codes.Canceled, "context canceled"), codes.Canceled, errcode.ErrCanceled},
 		}
 		for _, c := range cases {
 			st := status.Convert(toStatusErr(c.in))

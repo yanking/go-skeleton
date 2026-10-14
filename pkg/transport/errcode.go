@@ -96,6 +96,14 @@ func toStatusErr(err error) error {
 	if errors.As(err, &gs) {
 		// GRPCStatus 返回 nil 或 OK 的实现，其 Err() 会给 nil——错误变成功，照样兜成内部错误。
 		if st := gs.GRPCStatus(); st != nil && st.Code() != codes.OK {
+			// 下游 gRPC 调用带回的超时/取消是 status 形态，与裸 ctx 错误是同一故障，
+			// 走同一通用码——否则同一故障两种契约，客户端按 code 做重试决策会把超时当内部错误。
+			switch st.Code() {
+			case codes.DeadlineExceeded:
+				return statusFromCode(errcode.ErrDeadlineExceeded)
+			case codes.Canceled:
+				return statusFromCode(errcode.ErrCanceled)
+			}
 			return scrubFault(st).Err()
 		}
 	}

@@ -126,11 +126,13 @@ func streamAccessLog(logger *slog.Logger) grpc.StreamServerInterceptor {
 
 // logAccess 输出一条访问日志。code 成功失败都记（成功即 OK）——字段稳定存在，
 // 下游才能统一按它做检索、告警与成功率 SLI；只在失败时才有的字段做不了分母。
+// code 记出口翻译后线上实际发出的码（本拦截器在翻译之内，看到的是原始错误），
+// 否则 errcode 与裸错误在日志里一律是 Unknown，分不开客户端取消与服务端故障；err 仍记原始错误。
 func logAccess(ctx context.Context, logger *slog.Logger, method string, elapsed time.Duration, err error) {
 	attrs := []any{
 		"rpc", method,
 		"peer", peerAddr(ctx),
-		"code", status.Code(err).String(),
+		"code", status.Code(toStatusErr(err)).String(),
 		"duration", elapsed.String(),
 	}
 	if err != nil {

@@ -40,7 +40,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | 包 | 职责 |
 |---|---|
 | `pkg/app` | 组件生命周期编排:按注册顺序拉起、逆序停止 |
-| `pkg/conf` | YAML 配置加载与绑定校验 |
+| `pkg/conf` | YAML 配置加载与绑定校验;`${NAME}` 引用在解析前从环境变量展开,未设置或写法不合文法即 panic |
 | `pkg/log` | 构造统一 slog.Logger,支持从 ctx 提取 trace_id 等字段 |
 | `pkg/errcode` | 业务错误码与错误的「双通道」封装 |
 | `pkg/telemetry` | OTel 链路追踪与指标一键装配,stdout/otlp 双导出,含运行时指标 |

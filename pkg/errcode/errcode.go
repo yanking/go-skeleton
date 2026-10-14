@@ -44,7 +44,7 @@ func Wrap(cause error, ec Code) error {
 	return &wrapped{Code: ec, cause: cause}
 }
 
-// wrapped 是 Wrap 的返回类型，unexported：调用方只应通过 errors.As / Unwrap 观察，
+// wrapped 是 Wrap 的返回类型，unexported：调用方只应通过 errors.Is / errors.As / Unwrap 观察，
 // 不依赖具体类型，以便将来调整实现。
 type wrapped struct {
 	Code
@@ -59,7 +59,8 @@ func (w *wrapped) Error() string {
 	return fmt.Sprintf("code=%d message=%s cause=%v", ec.Code, ec.Message, w.cause)
 }
 
-// Unwrap 打通原始错误链：errors.Is(err, 哨兵) 与日志里的 cause 都依赖它。
+// Unwrap 打通原始错误链：errors.Is 对原始链上的哨兵（如 gorm.ErrRecordNotFound）命中
+// 与日志里的 cause 都依赖它；业务哨兵的命中由 Is 负责。
 func (w *wrapped) Unwrap() error { return w.cause }
 
 // As 使 errors.As(err, &Code{}) 能提取业务字段。

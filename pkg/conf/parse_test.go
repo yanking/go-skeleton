@@ -230,3 +230,34 @@ func TestMustLoadPanicsOnUnsetEnv(t *testing.T) {
 	}()
 	conf.MustLoad(writeFile(t, "password: \"${CONF_TEST_UNSET_VAR}\"\n"), &c)
 }
+
+// recoverMessage 跑 fn 并返回其 panic 信息；不 panic 即失败。
+func recoverMessage(t *testing.T, fn func()) (msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("期望 panic，实际正常返回")
+		}
+		msg = fmt.Sprint(r)
+	}()
+	fn()
+	return ""
+}
+
+// TestMustLoadPanicsOnMalformedEnvRef 守住：写错的 ${...} 不能静默当字面量放行——
+// ${VAR:-默认} 是最容易手写出来的形态，字面串成了凭证就是失败开放。
+func TestMustLoadPanicsOnMalformedEnvRef(t *testing.T) {
+	t.Setenv("CONF_TEST_X", "x")
+	for _, token := range []string{"${}", "${DB-PASSWORD}", "${CONF_TEST_X:-d}", "${1X}", "${密码}", "${${CONF_TEST_X}}"} {
+		t.Run(token, func(t *testing.T) {
+			msg := recoverMessage(t, func() {
+				var c envConf
+				conf.MustLoad(writeFile(t, "password: \""+token+"\"\n"), &c)
+			})
+			if !strings.Contains(msg, "不合文法") {
+				t.Errorf("panic 信息未指出记号不合文法: %s", msg)
+			}
+		})
+	}
+}

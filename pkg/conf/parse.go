@@ -1,5 +1,11 @@
-// Package conf 提供服务配置加载：读取 YAML 文件并绑定到配置结构体。
-// 仅暴露 MustLoad，供 main 装配期调用；任何失败直接 panic——起不来就死。
+// Package conf 提供服务配置加载：读取 YAML 文件、展开其中的 ${NAME} 环境变量引用，
+// 再绑定到配置结构体。仅暴露 MustLoad，供 main 装配期调用；任何失败直接 panic——起不来就死。
+//
+// ${NAME} 是凭证进配置的通道（宪法第 4 条）：yaml 里写 password: "${DB_PASSWORD}"，
+// 由部署侧经环境变量注入，明文不入库。展开是纯文本替换、发生在 YAML 解析之前，故：
+//   - 引用处加引号，值含 : # 等 YAML 特殊字符才不会改变结构；值含双引号或换行不支持；
+//   - 文件任何位置（含注释）的 ${NAME} 都会展开，NAME 未设置即 panic，已设置为空串照常展开；
+//   - 只认 ${NAME} 形式，$NAME 原样保留；不提供转义。
 package conf
 
 import (
@@ -8,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,7 +25,11 @@ type validator interface {
 	Validate() error
 }
 
-// MustLoad 读取 YAML 配置文件 configFile 并绑定到 obj（必须是指针）。
+// envRef 匹配 ${NAME} 形式的环境变量引用。只认带花括号的形式：$NAME 在 DSN、
+// 口令里可能是字面量，不展开它才不会误伤。
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// MustLoad 读取 YAML 配置文件 configFile，展开 ${NAME} 环境变量引用后绑定到 obj（必须是指针）。
 // 文件中出现 obj 之外的未知键视为错误，以尽早暴露键名拼写问题。
 // 若 obj 实现 Validate() error 则在绑定后调用。任何失败直接 panic。
 func MustLoad(configFile string, obj any) {
@@ -26,6 +37,7 @@ func MustLoad(configFile string, obj any) {
 	if err != nil {
 		panic(fmt.Errorf("读取配置文件 %s: %w", configFile, err))
 	}
+	data = expandEnv(data, configFile)
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -39,4 +51,18 @@ func MustLoad(configFile string, obj any) {
 			panic(fmt.Errorf("校验配置 %s: %w", configFile, err))
 		}
 	}
+}
+
+// expandEnv 把 data 里的 ${NAME} 换成环境变量值。NAME 未设置即 panic——换成空串
+// 等于把「漏配」伪装成「配了个空值」，恰是凭证类字段最危险的失败开放形态；
+// 显式设成空串的变量照常展开，那是操作者的明确决定。
+func expandEnv(data []byte, configFile string) []byte {
+	return envRef.ReplaceAllFunc(data, func(ref []byte) []byte {
+		name := string(ref[2 : len(ref)-1]) // 去掉 ${ 与 }
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			panic(fmt.Errorf("展开配置 %s: 环境变量 %s 未设置", configFile, name))
+		}
+		return []byte(v)
+	})
 }

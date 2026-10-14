@@ -73,7 +73,7 @@ gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成
 
 接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。
 
-数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
+数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由 make 从环境变量展开,未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 
 ## 服务开发流程(从零加一个服务的动线)
 

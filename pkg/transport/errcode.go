@@ -61,7 +61,7 @@ func isMajorVersion(s string) bool {
 
 // errCodeToStatus 出口层错误翻译（Unary）：errors.As 提取 errcode 业务字段——
 // Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason；
-// 非 errcode 错误原样放行，交由 gRPC 默认语义。
+// 已是 status 的错误原样放行；其余错误兜成通用内部错误，原始文本不出客户端。
 func errCodeToStatus(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	resp, err := handler(ctx, req)
 	if err != nil {
@@ -75,12 +75,38 @@ func errCodeToStatusStream(srv any, ss grpc.ServerStream, _ *grpc.StreamServerIn
 	return toStatusErr(handler(srv, ss))
 }
 
-// toStatusErr 做实际翻译：errcode → status（业务码进 details），其余原样返回。
+// toStatusErr 做实际翻译，按错误来源分三路：
+//   - errcode（含 Wrap 结果）→ status，业务码进 details；
+//   - 已是 status 的错误（handler 有意构造的 gRPC 原生错误）→ 取最内层 status 原样出去，
+//     外层 %w 加的上下文文本只进日志——那段文本常带内部细节；
+//   - 其余一律兜成通用内部错误：原始文本可能带 SQL、主机名，不能出客户端（宪法第 2 条），
+//     出口层不能指望每一层都记得翻译。ctx 超时/取消保留其语义码，客户端据此决定是否重试。
 func toStatusErr(err error) error {
-	var ec errcode.Code
-	if !errors.As(err, &ec) {
-		return err
+	if err == nil {
+		return nil
 	}
+	var ec errcode.Code
+	if errors.As(err, &ec) {
+		return statusFromCode(ec)
+	}
+	var gs interface{ GRPCStatus() *status.Status }
+	if errors.As(err, &gs) {
+		// GRPCStatus 返回 nil 或 OK 的实现，其 Err() 会给 nil——错误变成功，照样兜成内部错误。
+		if st := gs.GRPCStatus(); st != nil && st.Code() != codes.OK {
+			return st.Err()
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, context.DeadlineExceeded.Error())
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, context.Canceled.Error())
+	}
+	return statusFromCode(errcode.ErrInternal)
+}
+
+// statusFromCode 把业务错误码翻成 status：Status/Message 面向客户端，业务码放 details 的 ErrorInfo.Reason。
+func statusFromCode(ec errcode.Code) error {
 	// Status 漏填时 codes.Code 的零值就是 codes.OK，而 OK 状态的 Err() 返回 nil——
 	// 照直翻译会把业务错误吞成「成功」，是宪法第 1 条禁止的吞错，且客户端毫无察觉。
 	// 兜成 Unknown：业务码照样进 details，调用方至少知道这是个错误。

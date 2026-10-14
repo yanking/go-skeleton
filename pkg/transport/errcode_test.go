@@ -1,7 +1,10 @@
 package transport
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,7 +51,7 @@ func TestErrDomain(t *testing.T) {
 	}
 }
 
-// TestToStatusErr 覆盖出口翻译：业务码进 details 的 ErrorInfo，非 errcode 错误原样放行。
+// TestToStatusErr 覆盖出口翻译的三路：errcode 业务码进 details 的 ErrorInfo，已是 status 的原样放行，其余兜成内部错误。
 func TestToStatusErr(t *testing.T) {
 	ec := errcode.New(40001, "渠道实例不存在", codes.NotFound)
 
@@ -108,10 +111,74 @@ func TestToStatusErr(t *testing.T) {
 		}
 	})
 
-	t.Run("非业务错误原样放行", func(t *testing.T) {
-		plain := errors.New("非 errcode 错误")
-		if got := toStatusErr(plain); !errors.Is(got, plain) {
-			t.Errorf("toStatusErr 改写了非业务错误：%v", got)
+	t.Run("非业务错误兜成内部错误，原始文本不出客户端", func(t *testing.T) {
+		raw := errors.New("dial tcp 10.0.0.5:5432: connection refused")
+		st, ok := status.FromError(toStatusErr(fmt.Errorf("查询用户: %w", raw)))
+		if !ok {
+			t.Fatal("翻译结果不是 status 错误")
+		}
+		if st.Code() != codes.Internal {
+			t.Errorf("status code = %v，期望 %v", st.Code(), codes.Internal)
+		}
+		if st.Message() != errcode.ErrInternal.Message {
+			t.Errorf("message = %q，期望通用内部错误消息 %q", st.Message(), errcode.ErrInternal.Message)
+		}
+		if strings.Contains(st.Message(), "10.0.0.5") {
+			t.Error("原始错误文本泄漏进了给客户端的消息（违反宪法第 2 条）")
+		}
+		details := st.Details()
+		if len(details) != 1 {
+			t.Fatalf("details 条数 = %d，期望 1", len(details))
+		}
+		if info := details[0].(*errdetails.ErrorInfo); info.GetReason() != strconv.Itoa(errcode.ErrInternal.Code) {
+			t.Errorf("Reason = %q，期望通用内部错误码 %d", info.GetReason(), errcode.ErrInternal.Code)
+		}
+	})
+
+	t.Run("status 错误取最内层原样放行，外层包装文本不出客户端", func(t *testing.T) {
+		inner := status.Error(codes.PermissionDenied, "无权访问")
+		st, ok := status.FromError(toStatusErr(fmt.Errorf("校验 10.0.0.5: %w", inner)))
+		if !ok {
+			t.Fatal("翻译结果不是 status 错误")
+		}
+		if st.Code() != codes.PermissionDenied || st.Message() != "无权访问" {
+			t.Errorf("status = %v %q，期望 PermissionDenied 无权访问", st.Code(), st.Message())
+		}
+	})
+
+	t.Run("GRPCStatus 给 OK 的怪异实现也绝不吞错", func(t *testing.T) {
+		got := toStatusErr(okStatusErr{})
+		if got == nil {
+			t.Fatal("错误被吞成 nil")
+		}
+		if st := status.Convert(got); st.Code() != codes.Internal {
+			t.Errorf("status code = %v，期望兜成 %v", st.Code(), codes.Internal)
+		}
+	})
+
+	t.Run("errcode 与 status 同在链上时 errcode 优先", func(t *testing.T) {
+		err := errcode.Wrap(status.Error(codes.PermissionDenied, "无权访问"), ec)
+		if st := status.Convert(toStatusErr(err)); st.Code() != codes.NotFound || st.Message() != ec.Message {
+			t.Errorf("status = %v %q，期望按 errcode 翻译为 NotFound %q", st.Code(), st.Message(), ec.Message)
+		}
+	})
+
+	t.Run("ctx 超时与取消保留语义码，包装文本不出客户端", func(t *testing.T) {
+		cases := []struct {
+			in   error
+			want codes.Code
+		}{
+			{fmt.Errorf("查询 10.0.0.5: %w", context.DeadlineExceeded), codes.DeadlineExceeded},
+			{fmt.Errorf("查询 10.0.0.5: %w", context.Canceled), codes.Canceled},
+		}
+		for _, c := range cases {
+			st := status.Convert(toStatusErr(c.in))
+			if st.Code() != c.want {
+				t.Errorf("toStatusErr(%v) code = %v，期望 %v", c.in, st.Code(), c.want)
+			}
+			if strings.Contains(st.Message(), "10.0.0.5") {
+				t.Errorf("ctx 错误的包装文本泄漏进了客户端消息: %q", st.Message())
+			}
 		}
 	})
 
@@ -121,3 +188,9 @@ func TestToStatusErr(t *testing.T) {
 		}
 	})
 }
+
+// okStatusErr 模拟 GRPCStatus 返回 OK 的错误实现：其 Err() 会给 nil，出口层不能让它变成功。
+type okStatusErr struct{}
+
+func (okStatusErr) Error() string              { return "怪异实现" }
+func (okStatusErr) GRPCStatus() *status.Status { return status.New(codes.OK, "") }

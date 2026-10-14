@@ -47,7 +47,7 @@ check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
 	@drift=$$(gofmt -l .); test -z "$$drift" || { echo "$$drift"; echo ">> 存在未格式化文件,运行 make fmt"; exit 1; }
 
 # lint / vuln 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
-# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI 里各占一个 job。
+# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI(.github/workflows/ci.yml)里各占一个 job。
 lint: tools ## golangci-lint 全量检查(linter 选取与例外见 .golangci.yml)
 	$(TOOLS_DIR)/golangci-lint run ./...
 

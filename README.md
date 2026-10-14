@@ -46,6 +46,7 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
 `make help` 列出全部命令；`make check` 是提交门槛（build / vet / test 全绿 + gofmt 零漂移）。
 `make lint`（golangci-lint，配置见 `.golangci.yml`）与 `make vuln`（govulncheck 漏洞扫描）不并进 check——
 那会改动宪法第 5 条对门槛的定义。
+`.github/workflows/ci.yml` 在 push 与 PR 上跑 check / lint / vuln 三个 job——门槛由机器执行，不靠记得跑。
 
 ## 文档
 

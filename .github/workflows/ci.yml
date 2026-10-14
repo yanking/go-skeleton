@@ -1,0 +1,46 @@
+# 提交门槛的机器执行：宪法第 5 条的 make check 在 push / PR 上必跑。
+# lint 与 vuln 不并进 check（理由见 README「里面有什么」），各占一个 job 并行跑。
+# 工具链版本钉在 tools/go.mod，由 make tools 装进 bin/tools/——与本地一致。
+name: ci
+
+on:
+  push:
+    branches: [main, example]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
+      - run: make lint
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
+      - run: make vuln

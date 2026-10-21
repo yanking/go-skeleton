@@ -33,7 +33,7 @@ func (a *Client) dashboardQuery(ctx context.Context, params map[string]any) (*tx
 		code, body, err := a.http.PostJSON(ctx, a.conf.DashboardAPIs.Query,
 			map[string]string{"Authorization": token}, params, 0)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %v", adapter.ErrChannelRejected, err)
+			return nil, "", fmt.Errorf("%w: %w", adapter.ErrChannelRejected, err)
 		}
 		if code == 401 && attempt == 0 {
 			if _, err := a.token.refresh(ctx); err != nil {
@@ -142,7 +142,7 @@ func (a *Client) BalanceQuery(ctx context.Context) (adapter.BalanceOut, error) {
 		code, body, err := a.http.Get(ctx, a.conf.DashboardAPIs.Balance,
 			map[string]string{"Authorization": token, "Userid": a.conf.Payout.ClientSecret}, 0)
 		if err != nil {
-			return adapter.BalanceOut{}, fmt.Errorf("%w: %v", adapter.ErrChannelRejected, err)
+			return adapter.BalanceOut{}, fmt.Errorf("%w: %w", adapter.ErrChannelRejected, err)
 		}
 		if code == 401 && attempt == 0 {
 			if _, err := a.token.refresh(ctx); err != nil {

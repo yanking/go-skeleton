@@ -63,7 +63,7 @@ func loadConfig(configFile string) (config.Config, *slog.Logger) {
 func runDaemon(args []string) {
 	fs := flag.NewFlagSet("price", flag.ExitOnError)
 	configFile := fs.String("config", "./configs/price.yaml", "配置文件路径")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError：解析失败时 Parse 自己退出进程，返回值恒为 nil
 
 	c, logger := loadConfig(*configFile)
 
@@ -83,7 +83,7 @@ func runInstruments(args []string) {
 	fs := flag.NewFlagSet("instruments", flag.ExitOnError)
 	configFile := fs.String("config", "./configs/price.yaml", "配置文件路径")
 	exchangeName := fs.String("exchange", "", "交易所名称（binance/okx），必填")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError：解析失败时 Parse 自己退出进程，返回值恒为 nil
 
 	if *exchangeName == "" {
 		fmt.Fprintln(os.Stderr, "instruments: -exchange 不能为空")
@@ -114,7 +114,7 @@ func runBackfill(args []string) {
 	interval := fs.String("interval", "", "K 线周期，交易所原生拼写，如 1m，必填")
 	from := fs.String("from", "", "补洞起点，RFC3339 格式，如 2026-01-01T00:00:00Z，必填")
 	to := fs.String("to", "", "补洞止点，RFC3339 格式，必填")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError：解析失败时 Parse 自己退出进程，返回值恒为 nil
 
 	if *exchangeName == "" {
 		fmt.Fprintln(os.Stderr, "backfill: -exchange 不能为空")

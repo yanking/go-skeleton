@@ -207,7 +207,9 @@ func (c *Conn) runOnce(ctx context.Context) (connected bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("拨号 %s: %w", c.plan.URL, err)
 	}
-	defer conn.CloseNow()
+	// 收尾关闭：连接走到这里已经结束（断线或 ctx 取消），关闭失败没有可用的处置手段，
+	// 同 .golangci.yml 对 defer Close 的例外；也不能并进返回值——ctx 取消时 err 必须为 nil。
+	defer func() { _ = conn.CloseNow() }()
 
 	if err := c.subscribe(ctx, conn); err != nil {
 		return false, fmt.Errorf("发送订阅帧: %w", err)
@@ -264,7 +266,13 @@ func (c *Conn) triggerReady(ctx context.Context, subs []exchange.Sub) {
 func (c *Conn) dial(ctx context.Context) (*websocket.Conn, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, c.policy.DialTimeout)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, c.plan.URL, nil)
+	conn, resp, err := websocket.Dial(dialCtx, c.plan.URL, nil)
+	// coder/websocket 在 Dial 内部已接管或关掉了真正的响应体：成功时 resp.Body 置为 nil
+	// （升级后的连接归 conn 所有），失败时换成前 1KB 的内存副本。这里关的只是那份副本，
+	// 碰不到连接本身。
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -312,10 +320,14 @@ func (c *Conn) pingLoop(ctx context.Context, conn *websocket.Conn) {
 func (c *Conn) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
 		_, raw, err := conn.Read(ctx)
+		// ctx 已结束即正常退出（约定见函数注释）：这时的读失败只是取消的后果，不当作
+		// 断线上报；取消之后才读到的帧也不再处理。
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
 			return fmt.Errorf("读取帧: %w", err)
 		}
 		event, err := c.dec.Decode(raw)

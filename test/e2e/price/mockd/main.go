@@ -115,7 +115,8 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("ws 升级失败", "err", err)
 		return
 	}
-	defer c.CloseNow()
+	// 测试桩收尾：连接已断开，关闭失败没有可用的处置手段（同 .golangci.yml 对 defer Close 的例外）。
+	defer func() { _ = c.CloseNow() }()
 
 	h.register(c)
 	defer h.unregister(c)

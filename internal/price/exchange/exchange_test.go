@@ -19,7 +19,7 @@ func TestEvent_AllFieldsArePointers(t *testing.T) {
 	eventType := reflect.TypeOf(Event{})
 	for i := 0; i < eventType.NumField(); i++ {
 		field := eventType.Field(i)
-		if field.Type.Kind() != reflect.Ptr {
+		if field.Type.Kind() != reflect.Pointer {
 			t.Fatalf("Event.%s 必须是指针类型，当前是 %v", field.Name, field.Type.Kind())
 		}
 	}

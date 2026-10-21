@@ -1,6 +1,7 @@
 package payapay
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -77,7 +78,7 @@ func TestPaymentCallback_VerifyAndMap(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	out, err := a.PaymentCallback(nil, nil, string(data))
+	out, err := a.PaymentCallback(context.Background(), nil, string(data))
 	if err != nil {
 		t.Fatalf("PaymentCallback: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestPaymentCallback_VerifyAndMap(t *testing.T) {
 	// 篡改金额后验签必须失败。
 	fields["real_price"] = "99999"
 	tampered, _ := json.Marshal(fields)
-	if _, err := a.PaymentCallback(nil, nil, string(tampered)); err == nil {
+	if _, err := a.PaymentCallback(context.Background(), nil, string(tampered)); err == nil {
 		t.Fatal("tampered callback should fail verification")
 	}
 }
@@ -100,7 +101,7 @@ func TestPayoutCallback_UnknownStatus(t *testing.T) {
 	fields["sign"] = createSign(fields, "secret")
 	data, _ := json.Marshal(fields)
 
-	if _, err := a.PayoutCallback(nil, nil, string(data)); err == nil {
+	if _, err := a.PayoutCallback(context.Background(), nil, string(data)); err == nil {
 		t.Fatal("unknown status should be rejected")
 	}
 }

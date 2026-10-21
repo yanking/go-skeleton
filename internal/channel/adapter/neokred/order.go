@@ -39,7 +39,7 @@ func (a *Client) PaymentOrder(ctx context.Context, in adapter.PaymentOrderIn) (a
 
 	code, body, err := a.http.PostJSON(ctx, a.conf.Payment.APIs.Order, header, params, 0)
 	if err != nil {
-		return adapter.PaymentOrderOut{}, fmt.Errorf("%w: %v", adapter.ErrChannelRejected, err)
+		return adapter.PaymentOrderOut{}, fmt.Errorf("%w: %w", adapter.ErrChannelRejected, err)
 	}
 	if code != 200 {
 		return adapter.PaymentOrderOut{}, fmt.Errorf("%w: http %d, body %s", adapter.ErrChannelRejected, code, body)
@@ -88,7 +88,7 @@ func (a *Client) PayoutOrder(ctx context.Context, in adapter.PayoutOrderIn) (ada
 
 	code, body, err := a.http.PostJSON(ctx, a.conf.Payout.APIs.Order, header, params, 0)
 	if err != nil {
-		return adapter.PayoutOrderOut{}, fmt.Errorf("%w: %v", adapter.ErrChannelRejected, err)
+		return adapter.PayoutOrderOut{}, fmt.Errorf("%w: %w", adapter.ErrChannelRejected, err)
 	}
 	if code != 200 {
 		return adapter.PayoutOrderOut{}, fmt.Errorf("%w: http %d, body %s", adapter.ErrChannelRejected, code, body)

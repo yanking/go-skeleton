@@ -60,7 +60,7 @@ func (t *tokenHolder) refresh(ctx context.Context) (string, error) {
 
 		var result loginResult
 		if err := json.Unmarshal([]byte(body), &result); err != nil {
-			return nil, fmt.Errorf("%w: 登录响应 %s: %v", adapter.ErrBadResponse, body, err)
+			return nil, fmt.Errorf("%w: 登录响应 %s: %w", adapter.ErrBadResponse, body, err)
 		}
 		if result.StatusCode != 200 {
 			return nil, fmt.Errorf("%w: 登录业务失败, body %s", adapter.ErrChannelRejected, body)

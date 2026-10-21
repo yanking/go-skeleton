@@ -45,7 +45,7 @@ func (a *Client) post(ctx context.Context, path string, params map[string]any) (
 
 	code, body, err := a.http.PostJSON(ctx, a.conf.BaseURL+path, nil, params, 0)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", adapter.ErrChannelRejected, err)
+		return "", fmt.Errorf("%w: %w", adapter.ErrChannelRejected, err)
 	}
 	if code != 200 {
 		return "", fmt.Errorf("%w: http %d, body %s", adapter.ErrChannelRejected, code, body)
@@ -60,11 +60,11 @@ func call[T any](ctx context.Context, a *Client, path string, params map[string]
 		return "", err
 	}
 	if err := json.Unmarshal([]byte(body), out); err != nil {
-		return "", fmt.Errorf("%w: %s: %v", adapter.ErrBadResponse, body, err)
+		return "", fmt.Errorf("%w: %s: %w", adapter.ErrBadResponse, body, err)
 	}
 	var base baseResult
 	if err := json.Unmarshal([]byte(body), &base); err != nil {
-		return "", fmt.Errorf("%w: %s: %v", adapter.ErrBadResponse, body, err)
+		return "", fmt.Errorf("%w: %s: %w", adapter.ErrBadResponse, body, err)
 	}
 	if base.Code != 200 {
 		return "", fmt.Errorf("%w: 渠道业务失败, body %s", adapter.ErrChannelRejected, body)

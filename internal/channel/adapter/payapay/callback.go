@@ -17,7 +17,7 @@ func stringifyCallback(data string) (map[string]string, error) {
 	decoder := json.NewDecoder(strings.NewReader(data))
 	decoder.UseNumber()
 	if err := decoder.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("%w: 回调报文非 JSON: %v", adapter.ErrBadResponse, err)
+		return nil, fmt.Errorf("%w: 回调报文非 JSON: %w", adapter.ErrBadResponse, err)
 	}
 
 	out := make(map[string]string, len(raw))
@@ -57,7 +57,7 @@ func (a *Client) verifyCallback(data string) (map[string]string, error) {
 func parseCallbackAmount(fields map[string]string, key string) (int64, error) {
 	amount, err := strconv.ParseInt(fields[key], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%w: 解析回调金额 %s=%q: %v", adapter.ErrBadResponse, key, fields[key], err)
+		return 0, fmt.Errorf("%w: 解析回调金额 %s=%q: %w", adapter.ErrBadResponse, key, fields[key], err)
 	}
 	return amount, nil
 }

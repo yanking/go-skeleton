@@ -2,6 +2,7 @@ package initial
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -50,14 +51,19 @@ func oneshotExchange(c config.Config, hc *httpc.Client, ex string) (exchange.Exc
 // 调用方（main）随后退出。只造本次需要的资源：pgsql（写交易对表）、httpc、
 // 目标交易所的客户端与限速桶、service——不建 redis 连接，ImportInstruments
 // 不写 Redis。
-func Instruments(ctx context.Context, c config.Config, logger *slog.Logger, ex string) error {
+func Instruments(ctx context.Context, c config.Config, logger *slog.Logger, ex string) (err error) {
 	c.Pgsql.Logger = logger
 	db := pgsql.New(c.Pgsql)
 	// 子命令不进 pkg/app，没有 App.Stop 帮忙收尾——自己负责关闭连接池；
 	// db.Stop 内部不看传入的 ctx（直接关底层 *sql.DB），用
 	// context.Background() 而不是 ctx 是为了不受调用方 ctx 已取消（如子命令
-	// 跑到一半收到信号）影响，defer 阶段仍能正常关闭。
-	defer db.Stop(context.Background())
+	// 跑到一半收到信号）影响，defer 阶段仍能正常关闭。关闭失败经命名返回值
+	// 与业务错误一并返回，不吞掉。
+	defer func() {
+		if stopErr := db.Stop(context.Background()); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("关闭数据库连接池: %w", stopErr))
+		}
+	}()
 
 	hc := httpc.New(httpc.Config{})
 	impl, limiter, err := oneshotExchange(c, hc, ex)
@@ -77,12 +83,16 @@ func Instruments(ctx context.Context, c config.Config, logger *slog.Logger, ex s
 // Backfill 按显式区间补一段历史 K 线，跑完返回；不进 pkg/app。只造本次需要
 // 的资源：pgsql（写 K 线表）、httpc、目标交易所的客户端与限速桶、
 // service——同样不建 redis 连接，补洞不写 Redis。
-func Backfill(ctx context.Context, c config.Config, logger *slog.Logger, args BackfillArgs) error {
+func Backfill(ctx context.Context, c config.Config, logger *slog.Logger, args BackfillArgs) (err error) {
 	c.Pgsql.Logger = logger
 	db := pgsql.New(c.Pgsql)
 	// 理由同 Instruments：子命令自己负责关闭连接池，用 context.Background()
-	// 不受调用方 ctx 已取消影响。
-	defer db.Stop(context.Background())
+	// 不受调用方 ctx 已取消影响；关闭失败与业务错误一并返回。
+	defer func() {
+		if stopErr := db.Stop(context.Background()); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("关闭数据库连接池: %w", stopErr))
+		}
+	}()
 
 	hc := httpc.New(httpc.Config{})
 	impl, limiter, err := oneshotExchange(c, hc, args.Exchange)

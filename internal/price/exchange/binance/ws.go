@@ -286,7 +286,7 @@ func decodeDepth(stream string, data json.RawMessage) (exchange.Event, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return exchange.Event{}, fmt.Errorf("binance: 解析 depth 帧: %w", err)
 	}
-	payload, err := json.Marshal(normalizedDepth{Bids: f.Bids, Asks: f.Asks})
+	payload, err := json.Marshal(normalizedDepth(f))
 	if err != nil {
 		return exchange.Event{}, fmt.Errorf("binance: 序列化归一化 depth: %w", err)
 	}

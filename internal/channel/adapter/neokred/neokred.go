@@ -41,7 +41,7 @@ type baseResult struct {
 // unmarshalResult 解析响应并校验渠道业务码。
 func unmarshalResult(body string, base *baseResult, out any) error {
 	if err := json.Unmarshal([]byte(body), out); err != nil {
-		return fmt.Errorf("%w: %s: %v", adapter.ErrBadResponse, body, err)
+		return fmt.Errorf("%w: %s: %w", adapter.ErrBadResponse, body, err)
 	}
 	if base.StatusCode != 200 {
 		return fmt.Errorf("%w: 渠道业务失败, body %s", adapter.ErrChannelRejected, body)

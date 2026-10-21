@@ -13,6 +13,7 @@
 Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` 子 module,其依赖不进主依赖图)、proto 契约 + gRPC/grpc-gateway、结构化日志、可观测性基建。
 它首先是**模板仓库**:一切改动都要经得起一个问题——"这个模式复制到第 10 个服务时还成立吗?"
 新增服务用 `.agents/skills/new-service` 技能渲染入口模板,不要手抄。
+服务可以只承载一个业务域(微服务),也可以承载多个(单体);两种形态的目录约定见「服务分层」,起服务时就要定。
 拿本仓起新项目用 `.agents/skills/new-project` 技能(`make new-project MODULE=...`):module path 与模板身份散在三十余处,手工改必漏。
 
 分支约定(判断"当前分支该有什么"看这里):
@@ -59,7 +60,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染);漏翻译的原始错误(非 errcode 也非 status)在出口兜成通用内部错误 10003(ctx 超时/取消分别兜成 10005/10006),原文只进日志;status 错误放行(DeadlineExceeded/Canceled 例外,同 ctx 超时/取消兜成 10005/10006),但故障类码(Unknown/Internal/Unavailable/DataLoss)的消息换成通用内部错误消息——这是兜底,不是许可。每层只翻译相邻下层的错误。
 
-错误码分段(新服务在此登记):
+错误码分段(新服务在此登记;分模块的服务再在本段内按模块划千位子段,写进归属列):
 
 | 分段 | 归属 |
 |---|---|
@@ -67,7 +68,25 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 ## 服务分层(`internal/<svc>/`)
 
-目录(六件套):`config`(本服务配置结构体,绑定 `configs/<svc>.yaml`)/ `handler`(协议出口,薄壳,只调 service 并返回 errcode;仅 rpc/both 变体有)/ `service`(业务层,声明仓储接口——依赖倒置支点)/ `repo`(接口的 GORM 实现,ORM 不出本层)/ `model`(表模型,不出服务边界,出口转换由 handler 做)/ `job`(异步任务,实现 app.Component)。传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。
+目录(六件套):`config`(本服务配置结构体,绑定 `configs/<svc>.yaml`)/ `handler`(协议出口,薄壳,只调 service 并返回 errcode;仅 rpc/both 变体有)/ `service`(业务层,声明仓储接口——依赖倒置支点)/ `repo`(service 所声明接口的实现:GORM 仓储,以及 Redis、三方 HTTP 接口、邮件等外部依赖的适配;ORM 与三方 SDK 类型不出本层)/ `model`(表模型,不出所属模块,出口转换由 handler 做)/ `job`(异步任务,实现 app.Component)。
+
+布局按服务承载几个业务域选,起服务时就定(new-service 技能的 module 参数):
+
+| 布局 | 适用 | 目录 |
+|---|---|---|
+| 平铺 | 只承载一个业务域(微服务的常态) | 六件套直接放在 `internal/<svc>/` 下 |
+| 分模块 | 承载多个业务域(单体,或已知还会加业务域) | `config` 留在 `internal/<svc>/`,其余五件放进 `internal/<svc>/<module>/`;跨模块共用的件(如鉴权拦截器)放服务级共享包 `internal/<svc>/<pkg>/` |
+
+模块内部的职责与错误流向同平铺——平铺服务就是只有一个模块、且不单列目录。平铺服务要加第二个业务域时,先把现有代码迁成模块再写新模块:越晚迁,要挪的代码越多。已分模块的服务加业务域用 `.agents/skills/new-module` 技能。
+
+模块边界:
+- 跨模块只经对方的 `service` 包:调用方在自己的 service 里声明需要的窄接口,`cmd/<svc>/initial` 接线时传入对方的实现;不引用别的模块的 `handler`、`repo`、`model`、`job` 及其他子包。
+- 服务级共享包不引用任何模块:各模块都依赖它,反过来依赖就会成环,业务逻辑也能借道共享包绕过模块边界。
+- 同一个服务要么全平铺、要么全分模块,不混用。
+
+Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这三条由 `test/arch` 的架构测试在 `make check` 里强制。它按目录识别:服务下的一级目录名是层名的为平铺层,自身含 `service/` 子目录的为模块(`service` 是模块唯一的对外入口),其余为共享包——所以共享包不用层名命名,共享包和平铺服务的额外子包下也不建名为 `service` 的子目录。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名,也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
+
+传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler,再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;有 HTTP 出口的服务 `WithGateway` 同样每个模块追加一次)。
 
 gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成 gRPC 调用、经环回打回本进程,故拦截链对两种协议同样生效,业务代码只写一遍。两者各占一个端口,暴露范围、mesh 协议标注与网络策略可分别配置。
 
@@ -79,11 +98,11 @@ gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成
 
 ## 服务开发流程(从零加一个服务的动线)
 
-一个服务的产品落点(以 `<svc>` 代称):`api/<svc>/` proto 契约(`make proto` 生成到 `gen/` 的 pb、stub、gateway 转译与 OpenAPI spec)/ `cmd/<svc>/` 入口(`main.go` + `initial/` 装配)/ `configs/<svc>.yaml` 声明式配置 / `internal/<svc>/` 业务六件套(见上节)/ `migrations/<svc>/` goose 迁移(有库才有)。
+一个服务的产品落点(以 `<svc>` 代称):`api/<svc>/` proto 契约(`make proto` 生成到 `gen/` 的 pb、stub、gateway 转译与 OpenAPI spec)/ `cmd/<svc>/` 入口(`main.go` + `initial/` 装配)/ `configs/<svc>.yaml` 声明式配置 / `internal/<svc>/` 业务分层(平铺或分模块,见上节)/ `migrations/<svc>/` goose 迁移(有库才有)。
 
-1. **渲染入口**:用 `.agents/skills/new-service` 技能按变体(none/rpc/both)生成骨架与配置,随后按其清单登记错误码分段。
+1. **渲染入口**:先按「服务分层」定布局,再用 `.agents/skills/new-service` 技能按变体(none/rpc/both)生成骨架与配置——分模块的服务给出首个模块名;随后按其清单登记错误码分段。已分模块的服务加业务域用 `.agents/skills/new-module`。
 2. **契约先行**:在 `api/<svc>/` 写 proto,要 HTTP 出口就加 `google.api.http` 注解;注释格式按 `.agents/go-style.md`「proto 注释」(直接决定文档页的标题与字段说明),`make proto` 生成全部产物。
-3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。
+3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。分模块的服务逐个模块写,跨模块调用守「服务分层」的模块边界。
 4. **建库**:`make migrate-create SVC=<svc> NAME=<desc>` 生成首个迁移,写好 Up/Down 后 `make migrate-up`;后续变更一律新增文件(其余约定见上节)。
 5. **装配**:在 `cmd/<svc>/initial` 接线——createInfra 在前、createServer 在后;要 HTTP 出口就把 `WithGateway` 与 `http_addr` 一并放开(理由见「服务分层」的「能力与部署分离」段)。
 6. **验证与运行**:`make check` 全绿后 `make run SVC=<svc>`,HTTP 出口 `/docs` 看接口文档。端到端脚本按服务放 `test/e2e/<svc>/run.sh`(自带迁移、测试数据写入、被测服务与下游 mock 的起停),用 `make e2e SVC=<svc>` 跑,前置是本地 Postgres + grpcurl + jq。

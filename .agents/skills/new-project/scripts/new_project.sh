@@ -115,7 +115,7 @@ subst .agents/skills/new-service/SKILL.md -e "s#在 go-skeleton 仓库新增微�
 subst .agents/skills/new-service/assets/openapi/docs.html -e "s#go-skeleton API 文档#${name} API 文档#g"
 # 派生项目不再是模板仓:定位改写,分支约定表改写为 main / feature 两行(去掉 example)。
 subst AGENTS.md \
-	-e "s#^它首先是\*\*模板仓库\*\*.*#本仓基于 go-skeleton 模板骨架起步。模板层(\`pkg/\`、\`Makefile\`、\`.agents/\`)的改动仍要经得起一个问题——\"这个模式复制到第 10 个服务时还成立吗?\"#" \
+	-e "s#^它首先是\*\*模板仓库\*\*.*#本仓基于 go-skeleton 模板骨架起步。模板层(\`pkg/\`、\`Makefile\`、\`.agents/\`、\`test/arch/\`)的改动仍要经得起一个问题——\"这个模式复制到第 10 个服务时还成立吗?\"#" \
 	-e "/^拿本仓起新项目用/d" # 派生项目不是模板仓,这条动线不再适用(new-project 技能留着,跑到会自己拒绝)
 branch_table=$(
 	cat <<'TABLE'
@@ -160,8 +160,10 @@ make check   # 提交门槛:build / vet / test 全绿 + gofmt 零漂移
 新增服务用 \`.agents/skills/new-service\` 技能渲染入口模板,不要手抄:
 
 \`\`\`sh
-bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
+bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]
 \`\`\`
+
+一个服务承载多个业务域时给出首个模块名,按模块分目录;已分模块的服务加业务域用 \`.agents/skills/new-module\`。布局怎么选见 AGENTS.md「服务分层」。
 
 跑起来:\`make run SVC=<svc>\`;有 HTTP 出口的服务在 \`/docs\` 看接口文档。
 
@@ -205,4 +207,4 @@ echo "已改造为 ${name}(module ${module}),git 历史重置为单提交 main�
 echo "下一步："
 echo "  1) 补 README.md 的一句话定位,按需删掉 pkg/ 里用不到的包(如只用 pgsql 就删 mysql)"
 echo "  2) git remote add origin <你的新仓地址> && git push -u origin main"
-echo "  3) 用 new-service 技能起第一个服务：bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]"
+echo "  3) 用 new-service 技能起第一个服务(单体给出首个模块名,按模块分目录)：bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]"

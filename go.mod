@@ -1,6 +1,6 @@
 module github.com/yanking/go-skeleton
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/XSAM/otelsql v0.43.0

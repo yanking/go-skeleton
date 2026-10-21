@@ -22,11 +22,13 @@ make new-project MODULE=github.com/acme/acme-pay
 ## 起一个新服务
 
 ```sh
-bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
+bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]
 ```
 
 变体决定对外出口：`none` 无传输（纯异步任务型），`rpc` 纯 gRPC，`both` 再加 grpc-gateway
 转译的 HTTP 出口（各占一个端口）。随后按 `AGENTS.md`「服务开发流程」补分层实现。
+一个服务承载多个业务域（单体）时给出首个模块名，按模块分目录；已分模块的服务加业务域用
+`new-module` 技能。布局怎么选见 `AGENTS.md`「服务分层」。
 
 跑起来 `make run SVC=<svc>`；有 HTTP 出口的服务在 `/docs` 看接口文档。
 
@@ -55,5 +57,5 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
 | [AGENTS.md](AGENTS.md) | 项目导航与约束入口（给 AI 助手与新人），含分层约定与开发动线 |
 | [CONSTITUTION.md](CONSTITUTION.md) | 仓库最高约束，与其冲突的一律以它为准 |
 | `.agents/go-style.md` | 编码规范 |
-| `.agents/skills/` | 可执行技能：`new-project` 起项目、`new-service` 起服务 |
+| `.agents/skills/` | 可执行技能：`new-project` 起项目、`new-service` 起服务、`new-module` 加模块 |
 | [docs/toolbox.md](docs/toolbox.md) | 仓库级工具参考 |

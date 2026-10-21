@@ -26,7 +26,7 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 ## 生成后必做（顺序即检查清单）
 
 1. **登记错误码分段**：AGENTS.md 错误码分段表新增一行，分配一个未使用的万位段给该服务（每段 10000 宽，如 20000–29999；已用与未分配段见该表，通用码占 10000–19999）。分模块的服务同时在这一行给首个模块划千位子段。
-2. **写 proto 契约并生成产物**（rpc/both 变体）：动线见 AGENTS.md「服务开发流程」第 2 步；注释格式按 `.agents/go-style.md`「proto 注释」——它直接生成文档页的操作标题与字段说明。写完跑 `make proto`。
+2. **写 proto 契约并生成产物**（rpc/both 变体）：动线见 AGENTS.md「服务开发流程」第 2 步；注释格式按 `.agents/go-style.md`「proto 注释」——它直接生成文档页的操作标题与字段说明。写完跑 `make proto`。分模块的服务一个模块一个 proto 文件（`api/<svc>/v1/<module>.proto`），首个模块也一样。
 3. **填业务实体**：骨架目录已生成，各层填什么见其 doc.go 注释；职责、接口位置、错误流向遵守 AGENTS.md「服务分层」与「错误处理约定」两节。
 4. **挂基础组件**：用到 db/redis 时在 createInfra 构造注册（基础在前），句柄解嵌后传给 createServer 侧使用；Config 与 yaml 相应加段。有库的服务同时用 `make migrate-create SVC=<svc> NAME=<desc>` 建首个迁移（流程见 AGENTS.md「服务开发流程」）。
 5. **验证**：`make check` 全绿后收工（含 gofmt 零漂移）。

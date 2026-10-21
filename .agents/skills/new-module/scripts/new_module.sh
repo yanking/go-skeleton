@@ -50,9 +50,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 这五个包注释模板只含 __scope__ 占位(服务名已折进 scope 里),所以只替换它。
+# 这五个包注释模板目前只含 __scope__ 占位(服务名已折进 scope 里)。__svc__ 也一并替换,
+# 与 new_service.sh 的 render 一致:日后哪个模板用上 __svc__,这里不会静默留下裸占位符。
 scope=" ${svc} 服务的 ${module} 模块"
-render() { sed -e "s/__scope__/$scope/g" "$1" > "$2"; }
+render() { sed -e "s/__svc__/$svc/g" -e "s/__scope__/$scope/g" "$1" > "$2"; }
 
 layers="service/repo/model/job"
 mkdir -p "${dir}/service" "${dir}/repo" "${dir}/model" "${dir}/job"

@@ -160,8 +160,10 @@ make check   # 提交门槛:build / vet / test 全绿 + gofmt 零漂移
 新增服务用 \`.agents/skills/new-service\` 技能渲染入口模板,不要手抄:
 
 \`\`\`sh
-bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]
+bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]
 \`\`\`
+
+一个服务承载多个业务域时给出首个模块名,按模块分目录;已分模块的服务加业务域用 \`.agents/skills/new-module\`。布局怎么选见 AGENTS.md「服务分层」。
 
 跑起来:\`make run SVC=<svc>\`;有 HTTP 出口的服务在 \`/docs\` 看接口文档。
 
@@ -205,4 +207,4 @@ echo "已改造为 ${name}(module ${module}),git 历史重置为单提交 main�
 echo "下一步："
 echo "  1) 补 README.md 的一句话定位,按需删掉 pkg/ 里用不到的包(如只用 pgsql 就删 mysql)"
 echo "  2) git remote add origin <你的新仓地址> && git push -u origin main"
-echo "  3) 用 new-service 技能起第一个服务：bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both]"
+echo "  3) 用 new-service 技能起第一个服务(单体给出首个模块名,按模块分目录)：bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]"

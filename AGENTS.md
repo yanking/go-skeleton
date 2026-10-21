@@ -84,7 +84,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 - 服务级共享包不引用任何模块:各模块都依赖它,反过来依赖就会成环,业务逻辑也能借道共享包绕过模块边界。
 - 同一个服务要么全平铺、要么全分模块,不混用。
 
-Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这三条由 `test/arch` 的架构测试在 `make check` 里强制。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名,也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
+Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这三条由 `test/arch` 的架构测试在 `make check` 里强制。它按目录识别:服务下的一级目录名是层名的为平铺层,自身含 `service/` 子目录的为模块(`service` 是模块唯一的对外入口),其余为共享包——所以共享包不用层名命名,共享包和平铺服务的额外子包下也不建名为 `service` 的子目录。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名,也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
 
 传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler,再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;有 HTTP 出口的服务 `WithGateway` 同样每个模块追加一次)。
 

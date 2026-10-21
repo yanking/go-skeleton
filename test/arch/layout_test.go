@@ -23,7 +23,9 @@ var layerNames = []string{"handler", "service", "repo", "model", "job"}
 // violations 是按字符串排序的违规描述，其中的文件与目录路径都相对 root、以斜杠分隔。
 // internal/ 不存在时返回 nil、0、nil；读目录或解析 Go 文件失败作为 err 返回，绝不当作「无违规」。
 //
-// 服务下的一级子目录分三类：名字是层名的是平铺层；自己含有层名子目录的是模块；其余是服务级共享包。
+// 服务下的一级子目录分三类：名字是层名的是平铺层；自己含 service 子目录的是模块（service 是模块
+// 唯一的对外入口，脚本生成的模块都有它）；其余是服务级共享包。所以共享包与平铺服务的额外子包
+// 里不能建名为 service 的子目录，否则会被当成模块；叫 model 之类其他层名的子目录则无妨。
 // 查三类违规：
 //   - 同一服务既有平铺层又有模块；
 //   - 模块 A 的文件引用了模块 B 的包，而引用的不是 B 的 service 包本身；
@@ -138,7 +140,7 @@ func classify(svcDir string) (flat, modules []string, err error) {
 			flat = append(flat, name)
 			continue
 		}
-		isModule, err := hasLayerDir(filepath.Join(svcDir, name))
+		isModule, err := hasServiceDir(filepath.Join(svcDir, name))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -149,14 +151,16 @@ func classify(svcDir string) (flat, modules []string, err error) {
 	return flat, modules, nil
 }
 
-// hasLayerDir 报告 dir 的一级子目录里有没有名字是层名的。
-func hasLayerDir(dir string) (bool, error) {
+// hasServiceDir 报告 dir 的一级子目录里有没有名为 service 的，有就是模块。只认 service、不认别的层名：
+// 每个模块都有 service（唯一的对外入口），而平铺服务的 adapter/model、共享包下的 model 这类
+// 自然写法也带层名目录，不能因此被当成模块。
+func hasServiceDir(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, err
 	}
 	return slices.ContainsFunc(entries, func(e fs.DirEntry) bool {
-		return e.IsDir() && slices.Contains(layerNames, e.Name())
+		return e.IsDir() && e.Name() == "service"
 	}), nil
 }
 
@@ -189,9 +193,11 @@ func TestCheck(t *testing.T) {
 		services int      // 期望识别出的服务数
 		wants    []string // 期望的违规，各为一条违规的开头部分（路径、类别、关键标识），不要求顺序；nil 表示合规
 	}{
-		// 平铺服务带 sign、adapter/x 这类额外子包：它们不是模块，不能误报。
+		// 平铺服务带 sign、adapter/x 这类额外子包：它们不是模块，不能误报。adapter 下还有个叫 model 的
+		// 层名目录，但 adapter 没有 service 子目录，照样不是模块。
 		{name: "flat", services: 1},
 		// 分模块服务的合法写法：模块引用对方的 service、引用共享包，共享包引用共享包，模块引用自己的其他层。
+		// 共享包 common 下有层名目录 model，但 common 没有 service 子目录，仍是共享包，order 引用它不算跨模块。
 		{name: "modular", services: 1},
 		{
 			name:     "mixed",

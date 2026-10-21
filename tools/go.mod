@@ -3,7 +3,7 @@
 // 版本钉在本文件的 tool 段;安装见根 Makefile 的 tools 目标。
 module github.com/yanking/go-skeleton/tools
 
-go 1.27.2
+go 1.27.3
 
 tool (
 	github.com/bufbuild/buf/cmd/buf

@@ -41,9 +41,9 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 
 ## 里面有什么
 
-`pkg/` 十一个公共包：`app` 组件生命周期、`conf` 配置、`log` 结构化日志、`errcode` 错误双通道、
+`pkg/` 十二个公共包：`app` 组件生命周期、`conf` 配置、`log` 结构化日志、`errcode` 错误双通道、
 `telemetry` 链路与指标、`mysql`/`pgsql`/`redis` 存储、`httpc` 出站 HTTP、`transport` 传输
-（gRPC + gateway 双端口，拦截链含错误码出口翻译、访问日志、鉴权）、`queue` asynq 任务队列。
+（gRPC + gateway 双端口，拦截链含错误码出口翻译、访问日志、鉴权）、`httpserver` 基于 gin 的纯 HTTP 服务、`queue` asynq 任务队列。
 
 `make help` 列出全部命令；`make check` 是提交门槛（build / vet / test 全绿 + gofmt 零漂移）。
 `make lint`（golangci-lint，配置见 `.golangci.yml`）与 `make vuln`（govulncheck 漏洞扫描）不并进 check——

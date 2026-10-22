@@ -12,7 +12,7 @@ CMDS := $(notdir $(wildcard cmd/*))
 SVC ?= $(firstword $(CMDS))
 
 .DEFAULT_GOAL := help
-.PHONY: help new-project build run vet test check lint vuln fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e clean
+.PHONY: help new-project build run vet test check lint vuln fmt tidy tools proto proto-lint apidoc migrate-create migrate-up migrate-down migrate-status e2e clean
 
 help: ## 显示帮助
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -90,6 +90,18 @@ proto-lint: tools ## buf lint + 破坏性变更检查(基线默认为当前分�
 		echo ">> 要比对别的基线: make proto-lint BREAKING_BASE=origin/<分支>"; \
 	fi
 
+# 接口文档(http 形态的服务):swag 从 handler 注释生成 OpenAPI 3.1,落到 openapi/<svc>/v1/<svc>.openapi.json,
+# /docs 阅读页(openapi 包 embed)与前端的类型生成都读它。swag 只在这里生成文件,不进服务的依赖;
+# 版本钉在 tools/go.mod(v2 尚是候选版,只输出 JSON、不生成 docs.go,运行时不依赖它)。
+APIDOC_TMP := $(BIN_DIR)/apidoc
+
+apidoc: tools ## 生成 http 形态服务的 OpenAPI 3.1 文档: make apidoc SVC=<svc>
+	@test -n "$(SVC)" -a -d "cmd/$(SVC)" || { echo ">> 服务不存在。用法: make apidoc SVC=<svc>;现有: $(CMDS)"; exit 1; }
+	@rm -rf $(APIDOC_TMP) && mkdir -p openapi/$(SVC)/v1
+	$(TOOLS_DIR)/swag init --v3.1 --quiet --outputTypes json -g main.go -d cmd/$(SVC),internal/$(SVC),pkg/httpserver -o $(APIDOC_TMP)
+	@mv $(APIDOC_TMP)/swagger.json openapi/$(SVC)/v1/$(SVC).openapi.json && rm -rf $(APIDOC_TMP)
+	@echo ">> 已生成 openapi/$(SVC)/v1/$(SVC).openapi.json"
+
 # 数据库迁移(goose):迁移文件按服务放 migrations/<svc>/,序号统一用 migrate-create 生成的
 # 年月日时间戳(手写小序号与其混用会打乱应用顺序)。DSN 默认从 configs/<svc>.yaml 的 pgsql.write
 # 提取(值须带引号)——服务与库天然对应;部署侧/CI 必须显式注入 MIGRATE_DSN 环境变量覆盖,防止
@@ -120,9 +132,10 @@ migrate-status: ## 查看迁移状态: make migrate-status SVC=user
 	@test -x "$(GOOSE)" || $(MAKE) --no-print-directory tools
 	$(GOOSE) -dir $(MIGRATE_DIR) pgx "$(MIGRATE_DSN)" status
 
-# 端对端测试(grpcurl 打真实进程):脚本按服务放 test/e2e/<svc>/run.sh,自带迁移、
-# 测试数据写入、被测服务与下游 mock 的起停。SVC 与 run 一致(自动取首个服务)。
-e2e: ## 端对端测试: make e2e SVC=<svc>(前置:本地 Postgres、grpcurl、jq)
+# 端对端测试(打真实进程):脚本按服务放 test/e2e/<svc>/run.sh,自带迁移、
+# 测试数据写入、被测服务与下游 mock 的起停。前置条件因服务而异,以该服务 run.sh 的头部注释为准。
+# SVC 与 run 一致(自动取首个服务)。
+e2e: ## 端对端测试: make e2e SVC=<svc>(前置见 test/e2e/<svc>/run.sh 头部注释)
 	@test -x test/e2e/$(SVC)/run.sh || { echo ">> 暂无 $(SVC) 的端对端测试(test/e2e/$(SVC)/run.sh 不存在)"; exit 1; }
 	@test -x "$(GOOSE)" || $(MAKE) --no-print-directory tools
 	test/e2e/$(SVC)/run.sh

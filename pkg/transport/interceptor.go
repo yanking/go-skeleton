@@ -19,9 +19,11 @@ import (
 // gateway 会把 HTTP 头转成 metadata，故 HTTP 流量同样可取。
 //
 // 取到的值一律当外部输入看待：HTTP 侧的调用方可以用 Grpc-Metadata-<键> 头凭空
-// 造出任意 metadata 键（见 incomingHeaderMatcher）。所以 metadata 只适合承载
-// 「需要被校验的凭证」，不能用来传「已经被上游认证过的身份」——那种值必须由本
-// 进程的鉴权拦截器自己算出来放进 ctx，不能读客户端给的。
+// 造出任意 metadata 键（见 incomingHeaderMatcher）。所以 metadata 默认只适合承载
+// 「需要被校验的凭证」，不能用来传「已经被上游认证过的身份」。例外只有一种：本服务
+// 只给受信的上游调（挂了固定凭证鉴权，如 FixedBearerAuth），且不开 HTTP 出口——
+// 这时到得了业务代码的调用都已验过凭证，也没有 Grpc-Metadata-* 头可以伪造键，
+// 才能采信上游经 metadata 带来的身份；两个前提缺一，身份就必须由本进程自己算出来放进 ctx。
 func TokenFromMetadata(ctx context.Context, key string) (string, bool) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {

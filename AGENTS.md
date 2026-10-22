@@ -50,6 +50,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `pkg/redis` | go-redis 客户端,单机/集群经 addrs 数量自动推断,内嵌 `UniversalClient` 直接调用 |
 | `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,连接池逐 Client 独立;注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 只留 scheme://host/path,报文不记) |
 | `pkg/transport` | 对外传输组件:gRPC 服务 + grpc-gateway 转译的 HTTP 代理出口(各占一个端口),拦截链含 errcode 出口翻译、访问日志与鉴权(otel 另经 StatsHandler 挂载),链序见包注释 |
+| `pkg/httpserver` | 基于 gin 的 HTTP 服务组件(http 形态):只开一个 HTTP 端口,路由由服务自己用 gin 注册;错误体 `{code,message}`、HTTP 状态映射、访问日志、链路追踪与 `pkg/transport` 对齐,handler 经 `Handle` 返回 error 由本包统一翻译 |
 | `pkg/queue` | asynq 任务队列薄封装:Client 入队 + Worker 消费(实现 app.Component) |
 
 本表只是索引;使用约束(锁读纪律、停机顺序、全局状态、装配期行为)以各包 Go doc 注释为准,改用法前先读。
@@ -88,11 +89,13 @@ Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪
 
 传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler,再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;有 HTTP 出口的服务 `WithGateway` 同样每个模块追加一次)。
 
-gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成 gRPC 调用、经环回打回本进程,故拦截链对两种协议同样生效,业务代码只写一遍。两者各占一个端口,暴露范围、mesh 协议标注与网络策略可分别配置。
+rpc 与 both 形态的服务以 gRPC 为业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成 gRPC 调用、经环回打回本进程,故拦截链对两种协议同样生效,业务代码只写一遍。两者各占一个端口,暴露范围、mesh 协议标注与网络策略可分别配置。
+
+http 形态的服务(`pkg/httpserver`)只开 HTTP 端口,路由手写、不经 proto,用于对外的统一入口这类纯 HTTP 场景;它调内部服务仍走 gRPC。new-service 技能还没有这个变体,入口照 rpc 变体的骨架把 `transport.NewServer` 换成 `httpserver.New`。
 
 能力与部署分离:代码里给 `WithGateway` 声明「本服务有 HTTP 转译能力」,配置里的 `transport.http_addr` 决定「本次部署要不要暴露它」。只配端口未声明能力即装配期报错;只声明能力未配端口即纯 gRPC 部署,同一份二进制两种形态。
 
-接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。
+接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。http 形态的服务没有 proto,文档由 swag 从 handler 注释生成 OpenAPI 3.1(`make apidoc SVC=<svc>`,落到 `openapi/<svc>/v1/`),同样经 `openapi` 包挂到 `/docs`(仓里还没有该包时从 new-service 的 assets 拷入)。
 
 数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 
@@ -105,4 +108,4 @@ gRPC 是唯一的业务协议,HTTP 侧只是 gateway 代理:把 HTTP/JSON 翻成
 3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。分模块的服务逐个模块写,跨模块调用守「服务分层」的模块边界。
 4. **建库**:`make migrate-create SVC=<svc> NAME=<desc>` 生成首个迁移,写好 Up/Down 后 `make migrate-up`;后续变更一律新增文件(其余约定见上节)。
 5. **装配**:在 `cmd/<svc>/initial` 接线——createInfra 在前、createServer 在后;要 HTTP 出口就把 `WithGateway` 与 `http_addr` 一并放开(理由见「服务分层」的「能力与部署分离」段)。
-6. **验证与运行**:`make check` 全绿后 `make run SVC=<svc>`,HTTP 出口 `/docs` 看接口文档。端到端脚本按服务放 `test/e2e/<svc>/run.sh`(自带迁移、测试数据写入、被测服务与下游 mock 的起停),用 `make e2e SVC=<svc>` 跑,前置是本地 Postgres + grpcurl + jq。
+6. **验证与运行**:`make check` 全绿后 `make run SVC=<svc>`,HTTP 出口 `/docs` 看接口文档。端到端脚本按服务放 `test/e2e/<svc>/run.sh`(自带迁移、测试数据写入、被测服务与下游 mock 的起停),用 `make e2e SVC=<svc>` 跑,前置条件以该脚本的头部注释为准。

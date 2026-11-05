@@ -1,6 +1,6 @@
 ---
 name: new-module
-description: 在已按模块分目录的服务里新增业务模块：用脚本渲染 internal/<svc>/<module>/ 的分层骨架（各层 doc.go），再按清单划错误码子段、写 proto、接线。用户说「加个 xxx 模块 / 新增一个业务模块 / 在 <svc> 里加一个业务域」时使用；服务还是平铺布局时脚本会拒绝，先迁成模块。
+description: 在已按模块分目录的服务里新增业务模块：用脚本在各层下渲染 internal/<svc>/<层>/<module>/ 的骨架（层优先，各层 doc.go），再按清单划错误码子段、写 proto、接线。用户说「加个 xxx 模块 / 新增一个业务模块 / 在 <svc> 里加一个业务域」时使用；服务还是平铺布局时脚本会拒绝，先迁成模块。
 ---
 
 # 新增模块
@@ -14,7 +14,8 @@ bash .agents/skills/new-module/scripts/new_module.sh <svc> <module>
 ```
 
 - `<module>` 是小写字母开头的字母数字串（如 `order`），不能与层名（handler/service/repo/model/job）或 `config` 重名，也不能用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`；同名模块已存在时拒绝覆盖。
-- 生成 `internal/<svc>/<module>/` 下 `service/repo/model/job` 的 `doc.go`；服务有传输段（`configs/<svc>.yaml` 里有 `transport:`）时额外生成 `handler/doc.go`。包注释模板与 new-service 共用。
+- 布局是**层优先**的：模块是层内的一级子目录。生成 `internal/<svc>/{service,repo,model,job}/<module>/` 的 `doc.go`；服务已有 `handler` 层（即有协议出口）时额外生成 `internal/<svc>/handler/<module>/doc.go`。包注释模板与 new-service 共用。
+- 布局与「有没有协议出口」都只看目录，与 yaml 无关：`internal/<svc>/service/` 下直接放着 `.go` 即平铺（脚本拒绝，先迁模块）；有没有 `internal/<svc>/handler/` 决定要不要生成 handler 层。
 - 服务还是平铺布局（`internal/<svc>/` 下直接有分层目录）时拒绝执行：先按 AGENTS.md「服务分层」把现有代码迁成模块，再加新模块。
 
 ## 生成后必做（顺序即检查清单）

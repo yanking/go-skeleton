@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # new_service.sh <svc> [none|rpc|both] [module] — 渲染服务入口到仓库对应目录。
 # variant: none(默认,无传输)| rpc(纯 gRPC)| both(gRPC + gateway 转译的 HTTP,各占一端口)
-# module: 可选。服务承载多个业务域(单体,或已知还会加业务域)时给出首个模块名,按模块分目录:
-# 五层(handler/service/repo/model/job)生成在 internal/<svc>/<module>/ 下,config 仍在 internal/<svc>/;
-# 不给则六件套平铺在 internal/<svc>/ 下(只承载一个业务域的服务)。以后再加模块用 new-module 技能。
+# module: 可选。服务承载多个业务域(单体,或已知还会加业务域)时给出首个模块名,按模块分目录。
+# 布局是层优先的:模块是层里面的一级子目录,即 internal/<svc>/<层>/<module>/,config 仍在
+# internal/<svc>/config;不给则各层直接放文件(internal/<svc>/<层>/),只承载一个业务域的服务用它。
+# 以后再加模块用 new-module 技能。
 # 模板在 ../assets/，占位符 __svc__（服务名）、__Svc__（首字母大写，仅注释用）与 __scope__（包注释里的范围）。
 # __scope__ 自带空格，模板里写成「是__scope__的」、不留空格：平铺时是 " <svc> "（前后各一个空格），
 # 分模块时是 " <svc> 服务的 <module> 模块"（只有前导空格）。这样英文与中文之间有空格、
@@ -19,7 +20,8 @@ case "$variant" in
 	*) echo "变体须为 none|rpc|both: ${variant}" >&2; exit 1 ;;
 esac
 # 模块名规则同 new_module.sh(两处各自内联,改时一起改):小写字母开头的字母数字串;
-# 与层名重名会被 test/arch 当成平铺层,与 config 重名会撞上服务级配置包;
+# 与层名或 config 重名会渲染出 internal/<svc>/handler/handler/ 这种路径,且 initial 里按
+# 「<模块><层>」起的包别名会变成 handlerhandler,读不出来;
 # testdata、vendor、internal 是 Go 工具会特殊对待的目录名:./... 不匹配 testdata 与 vendor(test/arch
 # 也跳过 testdata),放进去的模块 make check 看不见;路径带 vendor 元素的包引用即被拒,带 internal
 # 元素的包只许其父目录之内引用,cmd/<svc>/initial 在其外,模块接不了线。
@@ -53,36 +55,38 @@ cleanup() {
 trap cleanup EXIT
 
 # 分层目录的落点与包注释里的 __scope__ 随布局定;config 两种布局都在 internal/<svc>/config。
+# 层优先:分模块时模块是层内的一级子目录,故落点是 internal/<svc>/<层>/<module>。
 if [ -n "$module" ]; then
-	layer_dir="internal/${svc}/${module}"
+	mod_suffix="/${module}"
 	scope=" ${svc} 服务的 ${module} 模块"
 else
-	layer_dir="internal/${svc}"
+	mod_suffix=""
 	scope=" ${svc} "
 fi
+layer_path() { printf 'internal/%s/%s%s' "$svc" "$1" "$mod_suffix"; }
 
 render() { sed -e "s/__svc__/$svc/g" -e "s/__Svc__/$Svc/g" -e "s/__scope__/$scope/g" "$1" > "$2"; }
 # shellcheck disable=SC2034  # Svc 供 render 的占位符替换使用
 Svc="$(echo "${svc:0:1}" | tr 'a-z' 'A-Z')${svc:1}"
 
 mkdir -p "cmd/${svc}/initial" "internal/${svc}/config" "configs" \
-	"${layer_dir}/service" "${layer_dir}/repo" \
-	"${layer_dir}/model" "${layer_dir}/job"
+	"$(layer_path service)" "$(layer_path repo)" \
+	"$(layer_path model)" "$(layer_path job)"
 render "$assets/main.go.tpl"   "cmd/${svc}/main.go"
 render "$assets/config.go.tpl" "internal/${svc}/config/config.go"
 render "$assets/service.yaml.tpl" "configs/${svc}.yaml"
 # 分层骨架：包注释即契约，各层填什么见渲染出的 doc.go 注释。
-render "$assets/service.doc.go.tpl" "${layer_dir}/service/doc.go"
-render "$assets/repo.doc.go.tpl"    "${layer_dir}/repo/doc.go"
-render "$assets/model.doc.go.tpl"   "${layer_dir}/model/doc.go"
-render "$assets/job.doc.go.tpl"     "${layer_dir}/job/doc.go"
-if [ "$variant" != "none" ]; then mkdir -p "${layer_dir}/handler"; fi
+render "$assets/service.doc.go.tpl" "$(layer_path service)/doc.go"
+render "$assets/repo.doc.go.tpl"    "$(layer_path repo)/doc.go"
+render "$assets/model.doc.go.tpl"   "$(layer_path model)/doc.go"
+render "$assets/job.doc.go.tpl"     "$(layer_path job)/doc.go"
+if [ "$variant" != "none" ]; then mkdir -p "$(layer_path handler)"; fi
 case "$variant" in
 	none) render "$assets/init_app.go.tpl"  "cmd/${svc}/initial/init_app.go" ;;
 	rpc)  render "$assets/init_rpc.go.tpl"  "cmd/${svc}/initial/init_app.go"
-	      render "$assets/handler.doc.go.tpl" "${layer_dir}/handler/doc.go" ;;
+	      render "$assets/handler.doc.go.tpl" "$(layer_path handler)/doc.go" ;;
 	both) render "$assets/init_both.go.tpl" "cmd/${svc}/initial/init_app.go"
-	      render "$assets/handler.doc.go.tpl" "${layer_dir}/handler/doc.go"
+	      render "$assets/handler.doc.go.tpl" "$(layer_path handler)/doc.go"
 	      # openapi 聚合包(spec embed + /docs 阅读页)仓内缺失时一并落地;
 	      # 无占位符,原样复制。make proto 产出首个 spec 前该包不编译,按清单顺序先契约后验证。
 	      if [ ! -e openapi/openapi.go ]; then
@@ -107,10 +111,10 @@ layers="service/repo/model/job"
 [ "$variant" != "none" ] && layers="${layers}/handler"
 render_done=1
 if [ -n "$module" ]; then
-	echo "已生成 cmd/${svc}、internal/${svc}/config、internal/${svc}/${module}（${layers}）、configs/${svc}.yaml（变体: ${variant}；分模块布局,首个模块: ${module}）"
+	echo "已生成 cmd/${svc}、internal/${svc}/config、internal/${svc}/{${layers}}/${module}（层优先,首个模块: ${module}）、configs/${svc}.yaml（变体: ${variant}）"
 	echo "后续：1) AGENTS.md 登记错误码分段,并在本服务的段内给 ${module} 模块划一个千位子段  2) 写 proto 契约、填业务实体(各层 doc.go 有指引)  3) make check"
 else
-	echo "已生成 cmd/${svc}、internal/${svc}（config/${layers}）、configs/${svc}.yaml（变体: ${variant}）"
+	echo "已生成 cmd/${svc}、internal/${svc}（config/${layers}）、configs/${svc}.yaml（变体: ${variant}；平铺布局）"
 	echo "后续：1) AGENTS.md 登记错误码分段  2) 写 proto 契约、填业务实体(各层 doc.go 有指引)  3) make check"
 fi
 if [ "$variant" = both ]; then

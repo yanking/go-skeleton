@@ -74,19 +74,24 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 | 布局 | 适用 | 目录 |
 |---|---|---|
-| 平铺 | 只承载一个业务域(微服务的常态) | 六件套直接放在 `internal/<svc>/` 下 |
-| 分模块 | 承载多个业务域(单体,或已知还会加业务域) | `config` 留在 `internal/<svc>/`,其余五件放进 `internal/<svc>/<module>/`;跨模块共用的件(如鉴权拦截器)放服务级共享包 `internal/<svc>/<pkg>/` |
+| 平铺 | 只承载一个业务域(微服务的常态) | 各层直接放文件:`internal/<svc>/<层>/` |
+| 分模块 | 承载多个业务域(单体,或已知还会加业务域) | **层优先**:模块是层内的一级子目录,`internal/<svc>/<层>/<module>/`;`config` 不分模块,仍在 `internal/<svc>/config`;跨模块共用的件(如鉴权拦截器)放服务级共享包 `internal/<svc>/<pkg>/` |
 
-模块内部的职责与错误流向同平铺——平铺服务就是只有一个模块、且不单列目录。平铺服务要加第二个业务域时,先把现有代码迁成模块再写新模块:越晚迁,要挪的代码越多。已分模块的服务加业务域用 `.agents/skills/new-module` 技能。
+**层名是封闭集合**(`handler`/`service`/`repo`/`model`/`job`),模块名是业务域名字。所以 `internal/user/service/wallet/` 里 `service` 是层、`wallet` 是模块;`internal/user/auth/` 这种不叫层名的一级目录是服务级共享包,不是层也不是模块。
+
+模块内部的职责与错误流向同平铺——平铺服务就是只有一个模块、且各层不单列模块子目录。平铺服务要加第二个业务域时,先把现有代码迁进模块子目录(每层各建一个)再写新模块:越晚迁,要挪的代码越多。已分模块的服务加业务域用 `.agents/skills/new-module` 技能。
 
 模块边界:
-- 跨模块只经对方的 `service` 包:调用方在自己的 service 里声明需要的窄接口,`cmd/<svc>/initial` 接线时传入对方的实现;不引用别的模块的 `handler`、`repo`、`model`、`job` 及其他子包。
-- 服务级共享包不引用任何模块:各模块都依赖它,反过来依赖就会成环,业务逻辑也能借道共享包绕过模块边界。
+- 跨模块只经对方的 `service` 包:调用方在自己的 service 里声明需要的窄接口,`cmd/<svc>/initial` 接线时传入对方的实现;不引用别的模块的 `handler`、`repo`、`model`、`job`,对方 `service` 的子包也不行。
+- 服务级共享包不引用任何模块(含它们的 `service` 包):各模块都依赖它,反过来依赖就会成环,业务逻辑也能借道共享包绕过模块边界。共享包确实需要某个模块的能力时,**声明窄接口并用自己的类型表达出入参**,由 initial 注入模块的实现——鉴权拦截器正是这个形状:它要按 token 查用户,却不能依赖 `auth` 模块,于是自己定义 `Verifier` 接口与 `Identity` 类型。
+- **层内不另建子包**:层优先布局里 `repo/shared/` 与 `repo/order/` 同形、分不开,所以层目录的一级子目录只能是模块。模块内部要再分包,放进模块里(`repo/<module>/<pkg>/`)。
 - 同一个服务要么全平铺、要么全分模块,不混用。
 
-Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这三条由 `test/arch` 的架构测试在 `make check` 里强制。它按目录识别:服务下的一级目录名是层名的为平铺层,自身含 `service/` 子目录的为模块(`service` 是模块唯一的对外入口),其余为共享包——所以共享包不用层名命名,共享包和平铺服务的额外子包下也不建名为 `service` 的子目录。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名,也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
+Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这几条由 `test/arch` 的架构测试在 `make check` 里强制。它按目录识别:服务一级子目录里名字是层名的是层目录,`config` 与其余名字是服务级共享包;**模块集合由 `service` 层的子目录定义**——`service` 是模块唯一的对外入口,别的层可以缺某个模块的目录(不是每个模块都有 job),拿它们当来源会把「某模块还没有 repo」误判成布局问题。层目录里直接放 `.go` 即平铺、只放子目录即分模块;两者并存、某层直接放 `.go` 而服务已分模块、或层内出现不在模块集合里的子目录,都报违规。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名(否则渲染出 `handler/handler/`,且 initial 的包别名会成 `handlerhandler`),也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
 
-传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler,再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;双端口形态的服务 `WithGateway` 同样每个模块追加一次)。
+跳层依赖一律经接口:每一层只依赖**使用方自己声明**的窄接口,不依赖下一层的具体类型(go-style 硬规则 6「接口在使用方声明」)。`handler` 在自己包里声明它需要的用例接口、`service` 声明仓储接口、`job` 声明它需要的用例接口,跨模块与共享包→模块同理(见上「模块边界」);具体实现一律由 `cmd/<svc>/initial` 注入,构造器因此「收接口、返具体类型」。好处是每一层都能脱开下层单测;代价是只有一个实现的地方也要写一份接口声明——这是刻意接受的,不以「现在只有一个实现」为由省掉。
+
+传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler(各层的模块子包),再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;双端口形态的服务 `WithGateway` 同样每个模块追加一次)。
 
 传输形态由构造器决定,配置地址须与形态匹配、错配即装配期报错(`pkg/transport` 包注释有全表):
 
@@ -110,7 +115,7 @@ new-service 技能还没有直连 REST 变体,入口照 rpc 变体的骨架把 `
 
 1. **渲染入口**:先按「服务分层」定布局,再用 `.agents/skills/new-service` 技能按变体(none/rpc/both)生成骨架与配置——分模块的服务给出首个模块名;随后按其清单登记错误码分段。已分模块的服务加业务域用 `.agents/skills/new-module`。
 2. **契约先行**:在 `api/<svc>/` 写 proto,要 HTTP 出口就加 `google.api.http` 注解;注释格式按 `.agents/go-style.md`「proto 注释」(直接决定文档页的标题与字段说明),`make proto` 生成全部产物。
-3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。分模块的服务逐个模块写,跨模块调用守「服务分层」的模块边界。
+3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。**每层先在自己包里声明它需要的下层接口,再写实现**(「跳层依赖一律经接口」)。分模块的服务逐个模块写,跨模块调用守「服务分层」的模块边界。
 4. **建库**:`make migrate-create SVC=<svc> NAME=<desc>` 生成首个迁移,写好 Up/Down 后 `make migrate-up`;后续变更一律新增文件(其余约定见上节)。
 5. **装配**:在 `cmd/<svc>/initial` 接线——createInfra 在前、createServer 在后;both 变体在业务 pb 就绪后把构造器换成 `NewRPCRESTServer`,连同 `WithGateway` 与 `http_addr` 在同一次改动里放开(形态与地址错配即装配期报错,见「服务分层」的形态表)。
 6. **验证与运行**:`make check` 全绿后 `make run SVC=<svc>`,HTTP 出口 `/docs` 看接口文档。端到端脚本按服务放 `test/e2e/<svc>/run.sh`(自带迁移、测试数据写入、被测服务与下游 mock 的起停),用 `make e2e SVC=<svc>` 跑,前置条件以该脚本的头部注释为准。

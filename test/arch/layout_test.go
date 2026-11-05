@@ -15,7 +15,7 @@ import (
 )
 
 // layerNames 是服务内的分层目录名：AGENTS.md「服务分层」六件套里除 config 以外的五层。
-// config 在两种布局里都留在服务级，所以不在其列，按共享包处理。
+// config 在两种布局里都留在服务级、且不分模块，所以不在其列，按共享包处理。
 var layerNames = []string{"handler", "service", "repo", "model", "job"}
 
 // check 检查 root 下 internal/ 的目录布局与模块边界，modulePath 是 root 所在 Go module 的路径
@@ -23,13 +23,17 @@ var layerNames = []string{"handler", "service", "repo", "model", "job"}
 // violations 是按字符串排序的违规描述，其中的文件与目录路径都相对 root、以斜杠分隔。
 // internal/ 不存在时返回 nil、0、nil；读目录或解析 Go 文件失败作为 err 返回，绝不当作「无违规」。
 //
-// 服务下的一级子目录分三类：名字是层名的是平铺层；自己含 service 子目录的是模块（service 是模块
-// 唯一的对外入口，脚本生成的模块都有它）；其余是服务级共享包。所以共享包与平铺服务的额外子包
-// 里不能建名为 service 的子目录，否则会被当成模块；叫 model 之类其他层名的子目录则无妨。
-// 查三类违规：
-//   - 同一服务既有平铺层又有模块；
+// 布局是**层优先**的：internal/<svc>/<层>/ 下直接放 Go 文件即平铺，放子目录即分模块
+// （internal/<svc>/<层>/<模块>/）。**模块集合由 service 层的子目录定义**——service 是模块
+// 唯一的对外入口，拿它当权威来源，其余层只能与它对齐。服务一级子目录里名字是层名的是层目录，
+// config 与其余名字是服务级共享包。
+//
+// 查五类违规：
+//   - service 层既直接放 Go 文件又有子目录（平铺与分模块混用）；
+//   - 服务已按模块分目录，某个层却直接放 Go 文件；
+//   - 层目录下出现不是模块的子目录（层优先布局里层内不另建子包——它与模块同形，分不开）；
 //   - 模块 A 的文件引用了模块 B 的包，而引用的不是 B 的 service 包本身；
-//   - 分模块服务的共享包引用了任何模块。
+//   - 服务级共享包引用了任何模块。
 //
 // 只查同一服务内部的引用，跨服务的引用不在检查范围；遍历时跳过 testdata 与以 . 或 _ 开头的目录
 // （与 go 工具一致）。服务根目录下直接放的 Go 文件不属于任何一类，不受检。
@@ -56,21 +60,15 @@ func check(root, modulePath string) (violations []string, services int, err erro
 	return violations, services, nil
 }
 
-// checkService 检查 internal/<svc>/ 这一个服务：先判布局有没有混用，再逐文件查模块边界。
+// checkService 检查 internal/<svc>/ 这一个服务：先判布局，再逐文件查模块边界。
 func checkService(root, modulePath, svc string) ([]string, error) {
 	svcDir := filepath.Join(root, "internal", svc)
-	flat, modules, err := classify(svcDir)
+	lay, violations, err := classify(svc, svcDir)
 	if err != nil {
 		return nil, err
 	}
-	var violations []string
-	if len(flat) > 0 && len(modules) > 0 {
-		violations = append(violations, fmt.Sprintf(
-			"internal/%s：平铺层 %v 与模块 %v 混用，先把平铺的代码迁进模块（见 AGENTS.md「服务分层」）",
-			svc, flat, modules))
-	}
-	if len(modules) == 0 {
-		return violations, nil // 两条引用规则只对分模块的服务生效
+	if len(lay.modules) == 0 {
+		return violations, nil // 引用规则只对分模块的服务生效
 	}
 
 	svcPrefix := "internal/" + svc + "/"
@@ -94,10 +92,9 @@ func checkService(root, modulePath, svc string) ([]string, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		// top 是文件所在的服务一级子目录：模块、平铺层或共享包。
-		top, _, nested := strings.Cut(strings.TrimPrefix(rel, svcPrefix), "/")
-		if !nested || slices.Contains(flat, top) {
-			return nil
+		top, mod, nested := lay.locate(strings.TrimPrefix(rel, svcPrefix))
+		if !nested {
+			return nil // 服务根目录下的散落文件不受检
 		}
 		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if err != nil {
@@ -112,7 +109,7 @@ func checkService(root, modulePath, svc string) ([]string, error) {
 			if !ok {
 				continue
 			}
-			if v := violationOf(rel, top, target, modules); v != "" {
+			if v := lay.violationOf(rel, top, mod, target); v != "" {
 				violations = append(violations, v)
 			}
 		}
@@ -124,57 +121,142 @@ func checkService(root, modulePath, svc string) ([]string, error) {
 	return violations, nil
 }
 
-// classify 返回 svcDir 下的平铺层与模块，各自按名字排序（os.ReadDir 按文件名返回）；
-// 其余一级子目录是服务级共享包，不单列。
-func classify(svcDir string) (flat, modules []string, err error) {
+// layout 是一个服务的目录布局：各层目录的内容形态，以及由 service 层定义的模块集合。
+type layout struct {
+	// layers 是存在的层目录名 → 其内容形态。
+	layers map[string]layerContent
+	// modules 是模块名，按名字排序；空即平铺服务（或还没有 service 层的骨架）。
+	modules []string
+}
+
+// layerContent 一个层目录的内容形态：直接放 Go 文件即平铺，只放子目录即分模块。
+type layerContent struct {
+	hasGo   bool
+	subdirs []string
+}
+
+// classify 判定服务布局并报告布局本身的违规。
+func classify(svc, svcDir string) (layout, []string, error) {
 	entries, err := os.ReadDir(svcDir)
 	if err != nil {
-		return nil, nil, err
+		return layout{}, nil, err
 	}
+	lay := layout{layers: map[string]layerContent{}}
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() || skipDir(name) {
+		if !e.IsDir() || skipDir(name) || !slices.Contains(layerNames, name) {
 			continue
 		}
-		if slices.Contains(layerNames, name) {
-			flat = append(flat, name)
-			continue
-		}
-		isModule, err := hasServiceDir(filepath.Join(svcDir, name))
+		c, err := readLayer(filepath.Join(svcDir, name))
 		if err != nil {
-			return nil, nil, err
+			return layout{}, nil, err
 		}
-		if isModule {
-			modules = append(modules, name)
+		lay.layers[name] = c
+	}
+
+	// 模块集合只认 service 层：它是模块唯一的对外入口，别的层可以缺某个模块的目录，
+	// 拿它们当权威来源就会把「某模块还没有 repo」误判成布局问题。
+	svcLayer, ok := lay.layers["service"]
+	switch {
+	case !ok:
+		return lay, nil, nil // 还没有 service 层（none 变体骨架），无模块可言
+	case svcLayer.hasGo && len(svcLayer.subdirs) > 0:
+		return lay, []string{fmt.Sprintf(
+			"internal/%s/service：既直接放 Go 文件又有子目录 %v，平铺与分模块不能混用（见 AGENTS.md「服务分层」）",
+			svc, svcLayer.subdirs)}, nil
+	case svcLayer.hasGo || len(svcLayer.subdirs) == 0:
+		return lay, nil, nil // 平铺服务
+	}
+	lay.modules = svcLayer.subdirs
+
+	var violations []string
+	for _, name := range layerNames {
+		c, ok := lay.layers[name]
+		if !ok || name == "service" {
+			continue
+		}
+		if c.hasGo {
+			violations = append(violations, fmt.Sprintf(
+				"internal/%s/%s：服务已按模块分目录 %v，本层却直接放 Go 文件，同一服务不能混用两种布局",
+				svc, name, lay.modules))
+		}
+		for _, sub := range c.subdirs {
+			if !slices.Contains(lay.modules, sub) {
+				violations = append(violations, fmt.Sprintf(
+					"internal/%s/%s/%s：不是模块（模块由 service 层的子目录定义：%v）——层优先布局里层内不另建子包，它与模块同形",
+					svc, name, sub, lay.modules))
+			}
 		}
 	}
-	return flat, modules, nil
+	return lay, violations, nil
 }
 
-// hasServiceDir 报告 dir 的一级子目录里有没有名为 service 的，有就是模块。只认 service、不认别的层名：
-// 每个模块都有 service（唯一的对外入口），而平铺服务的 adapter/model、共享包下的 model 这类
-// 自然写法也带层名目录，不能因此被当成模块。
-func hasServiceDir(dir string) (bool, error) {
+// readLayer 读层目录的内容形态；子目录按名字排序（os.ReadDir 已按文件名返回，排序只为不依赖该保证）。
+func readLayer(dir string) (layerContent, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false, err
+		return layerContent{}, err
 	}
-	return slices.ContainsFunc(entries, func(e fs.DirEntry) bool {
-		return e.IsDir() && e.Name() == "service"
-	}), nil
+	var c layerContent
+	for _, e := range entries {
+		name := e.Name()
+		switch {
+		case e.IsDir():
+			if !skipDir(name) {
+				c.subdirs = append(c.subdirs, name)
+			}
+		case filepath.Ext(name) == ".go":
+			c.hasGo = true
+		}
+	}
+	slices.Sort(c.subdirs)
+	return c, nil
 }
 
-// violationOf 判断 rel 文件（位于服务的 top 目录下，非平铺层）引用 target 是否违规，合规返回空串。
-// target 是被引用包相对 internal/<svc>/ 的路径，modules 是该服务的全部模块。
-func violationOf(rel, top, target string, modules []string) string {
-	dst, sub, _ := strings.Cut(target, "/")
+// locate 定位 rel（相对 internal/<svc>/ 的斜杠路径）：top 是它所在的服务一级子目录，
+// mod 是它所属的模块（不在分模块的层目录下时为空串），nested 为 false 表示它是服务
+// 根目录下的散落文件。
+func (l layout) locate(rel string) (top, mod string, nested bool) {
+	top, rest, nested := strings.Cut(rel, "/")
+	if !nested {
+		return top, "", false
+	}
+	mod, _ = l.moduleAt(top, rest)
+	return top, mod, true
+}
+
+// moduleAt 判断「层目录 top 下的 rest」属于哪个模块：mod 为空即不属于任何模块
+// （top 不是层目录、该层平铺、或首段不是模块名）。sub 是模块内的剩余路径，
+// 空串表示引用的就是该模块在该层的包本身。
+func (l layout) moduleAt(top, rest string) (mod, sub string) {
+	c, isLayer := l.layers[top]
+	if !isLayer || c.hasGo {
+		return "", ""
+	}
+	mod, sub, _ = strings.Cut(rest, "/")
+	if !slices.Contains(l.modules, mod) {
+		return "", ""
+	}
+	return mod, sub
+}
+
+// violationOf 判断 rel 文件（位于服务的 top 目录下、属于模块 mod）引用 target 是否违规，
+// 合规返回空串。target 是被引用包相对 internal/<svc>/ 的路径。
+func (l layout) violationOf(rel, top, mod, target string) string {
+	layer, rest, nested := strings.Cut(target, "/")
+	if !nested {
+		return ""
+	}
+	dst, sub := l.moduleAt(layer, rest)
 	switch {
-	case !slices.Contains(modules, dst):
-		return "" // 引用的不是模块（共享包等），不归这两条规则管
-	case !slices.Contains(modules, top):
+	case dst == "":
+		return "" // 引用的不是模块的包（共享包、config 等），不归这两条规则管
+	case mod == "" && !slices.Contains(layerNames, top):
 		return fmt.Sprintf("%s：服务级共享包 %s 引用了模块 %s，共享包不能反过来依赖模块", rel, top, dst)
-	case dst != top && sub != "service":
-		return fmt.Sprintf("%s：模块 %s 引用了模块 %s 的 %s，跨模块只能经对方的 service 包", rel, top, dst, target)
+	case mod == "":
+		return "" // 层目录却定不出模块：布局本身已报违规，不再叠加文件级违规
+	case dst != mod && !(layer == "service" && sub == ""):
+		return fmt.Sprintf("%s：模块 %s 引用了模块 %s 的 %s，跨模块只能经对方的 service 包", rel, mod, dst, target)
 	}
 	return ""
 }
@@ -193,26 +275,34 @@ func TestCheck(t *testing.T) {
 		services int      // 期望识别出的服务数
 		wants    []string // 期望的违规，各为一条违规的开头部分（路径、类别、关键标识），不要求顺序；nil 表示合规
 	}{
-		// 平铺服务带 sign、adapter/x 这类额外子包：它们不是模块，不能误报。adapter 下还有个叫 model 的
-		// 层名目录，但 adapter 没有 service 子目录，照样不是模块。
+		// 平铺服务带 sign、adapter/x 这类额外共享包：它们不是层目录，层内子包的禁令不及于它们；
+		// adapter 下还有个叫 model 的目录，但 adapter 本身不是层名，照样不受影响。
 		{name: "flat", services: 1},
-		// 分模块服务的合法写法：模块引用对方的 service、引用共享包，共享包引用共享包，模块引用自己的其他层。
-		// 共享包 common 下有层名目录 model，但 common 没有 service 子目录，仍是共享包，order 引用它不算跨模块。
+		// 分模块服务的合法写法：模块引用对方 service 层的包、引用自己的其他层、引用共享包，共享包引用共享包。
+		// 共享包 common 下有层名目录 model，但 common 不在服务一级的层目录之列，不参与模块判定。
+		// handler/model/repo 各缺一个模块的目录（不是每个模块都有每层），不该因此报违规。
 		{name: "modular", services: 1},
+		// service 层分了模块，repo 层却直接放 Go 文件。
 		{
 			name:     "mixed",
 			services: 1,
-			wants:    []string{"internal/shop：平铺层 [service] 与模块 [item] 混用"},
+			wants:    []string{"internal/shop/repo：服务已按模块分目录 [item]，本层却直接放 Go 文件"},
+		},
+		// 层内出现不是模块的子目录。
+		{
+			name:     "layersub",
+			services: 1,
+			wants:    []string{"internal/shop/repo/shared：不是模块"},
 		},
 		// 引用 repo、model 越界；_test.go 同样受检；service 的子包不在放行之列。
 		{
 			name:     "cross",
 			services: 1,
 			wants: []string{
-				"internal/shop/order/handler/handler.go：模块 order 引用了模块 item 的 item/model",
-				"internal/shop/order/service/a.go：模块 order 引用了模块 item 的 item/repo",
-				"internal/shop/order/service/b_test.go：模块 order 引用了模块 item 的 item/repo",
-				"internal/shop/order/service/c.go：模块 order 引用了模块 item 的 item/service/sub",
+				"internal/shop/handler/order/handler.go：模块 order 引用了模块 item 的 model/item",
+				"internal/shop/service/order/a.go：模块 order 引用了模块 item 的 repo/item",
+				"internal/shop/service/order/b_test.go：模块 order 引用了模块 item 的 repo/item",
+				"internal/shop/service/order/c.go：模块 order 引用了模块 item 的 service/item/sub",
 			},
 		},
 		{
@@ -261,20 +351,21 @@ func TestCheckWithoutInternal(t *testing.T) {
 // 其下的内容既不参与目录识别，也不参与引用检查。
 func TestCheckIgnoredEntries(t *testing.T) {
 	const empty = "package x\n"
-	// 没被跳过的话，这份引用会被当成 order 模块越界引用 item/repo。
-	crossing := importing("b/item/repo")
+	// 没被跳过的话，这份引用会被当成 order 模块越界引用 item 的 repo。
+	crossing := importing("b/repo/item")
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		// 平铺服务 a：testdata 若被识别，其下的 service 会被当成模块，与平铺层混用。
-		"internal/a/service/x.go":          empty,
-		"internal/a/testdata/service/x.go": empty,
-		// 分模块服务 b：order 下被跳过的目录引用 item/repo，不该报。
-		"internal/b/doc.go":              empty,
-		"internal/b/item/service/x.go":   empty,
-		"internal/b/order/service/x.go":  empty,
-		"internal/b/order/testdata/x.go": crossing,
-		"internal/b/order/_draft/x.go":   crossing,
-		"internal/b/order/.cache/x.go":   crossing,
+		// 平铺服务 a：testdata 若参与层目录识别，service 层就会被判成既有 Go 文件又有子目录。
+		"internal/a/service/x.go":               empty,
+		"internal/a/service/testdata/item/x.go": empty,
+		// 分模块服务 b：order 下被跳过的目录引用 item 的 repo，不该报。
+		"internal/b/doc.go":                      empty,
+		"internal/b/service/item/x.go":           empty,
+		"internal/b/repo/item/x.go":              empty,
+		"internal/b/service/order/x.go":          empty,
+		"internal/b/service/order/testdata/x.go": crossing,
+		"internal/b/service/order/_draft/x.go":   crossing,
+		"internal/b/service/order/.cache/x.go":   crossing,
 		// internal/ 下的散落文件与被跳过的目录都不是服务，服务数只能是 a 与 b。
 		"internal/doc.go":        empty,
 		"internal/testdata/x.go": empty,
@@ -290,23 +381,22 @@ func TestCheckIgnoredEntries(t *testing.T) {
 	}
 }
 
-// 混用的服务里，平铺层不按共享包查（它引用模块，已经算在混用里），其余违规照常报告；
-// 结果按字符串排序，与发现顺序无关：混用那条最先发现，字符串序却排在文件级违规之后。
+// 布局违规与文件级违规同时存在时都要报；结果按字符串排序，与发现顺序无关。
 func TestCheckMixedService(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		"internal/shop/service/x.go":       importing("shop/item/service"),
-		"internal/shop/item/service/x.go":  "package service\n",
-		"internal/shop/item/repo/x.go":     "package repo\n",
-		"internal/shop/order/service/x.go": importing("shop/item/repo"),
+		"internal/shop/service/item/x.go":  "package service\n",
+		"internal/shop/service/order/x.go": importing("shop/repo/item"),
+		"internal/shop/repo/item/x.go":     "package repo\n",
+		"internal/shop/handler/x.go":       "package handler\n",
 	})
 	got, _, err := check(root, fixtureModule)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
 	wants := []string{
-		"internal/shop/order/service/x.go：模块 order 引用了模块 item 的 item/repo",
-		"internal/shop：平铺层 [service] 与模块 [item order] 混用",
+		"internal/shop/handler：服务已按模块分目录 [item order]，本层却直接放 Go 文件",
+		"internal/shop/service/order/x.go：模块 order 引用了模块 item 的 repo/item",
 	}
 	if len(got) != len(wants) {
 		t.Fatalf("应有 %d 条违规，实际 %d 条：%q", len(wants), len(got), got)
@@ -318,12 +408,29 @@ func TestCheckMixedService(t *testing.T) {
 	}
 }
 
+// service 层既直接放 Go 文件又有子目录：布局无从判定，报混用并停在这里（不再查引用）。
+func TestCheckServiceLayerAmbiguous(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"internal/shop/service/x.go":      "package service\n",
+		"internal/shop/service/item/x.go": "package item\n",
+	})
+	got, _, err := check(root, fixtureModule)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	want := "internal/shop/service：既直接放 Go 文件又有子目录 [item]"
+	if len(got) != 1 || !strings.HasPrefix(got[0], want) {
+		t.Fatalf("应只有一条以 %q 开头的违规，实际 %q", want, got)
+	}
+}
+
 // 解析失败要作为 error 返回，不能当作「没有违规」。语法错误的文件进不了 testdata
 // （gofmt -l 会报），所以现场生成。
 func TestCheckParseError(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		"internal/shop/item/service/bad.go": "package service\n\nimport (\n",
+		"internal/shop/service/item/bad.go": "package service\n\nimport (\n",
 	})
 	_, _, err := check(root, fixtureModule)
 	if err == nil || !strings.Contains(err.Error(), "bad.go") {

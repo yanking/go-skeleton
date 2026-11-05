@@ -2,7 +2,8 @@ package transport
 
 // 直连 REST 形态（NewRESTServer）的拦截链：没有 gRPC 拦截器可挂，等价能力经
 // runtime.WithMiddlewares 组装在每条 gateway 路由上，链序与 gRPC 侧一致——
-// 访问日志在外、鉴权在内，出口翻译由 mux 的错误处理器承担（renderError）。
+// 访问日志在外、鉴权在内、WithMiddleware 的自定义中间件在最内（仍在 handler 之外），
+// 出口翻译由 mux 的错误处理器承担（renderError）。
 // middleware 由 ServeMux.Handle 在路由注册时挂上，只包住 gateway 路由：
 // /healthz、WithMount 挂载点与未匹配路由的 404 都不经此，与 gRPC 侧
 // 「探针豁免、未注册方法不经拦截器」的语义对齐。

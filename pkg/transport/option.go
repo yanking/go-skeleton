@@ -46,6 +46,7 @@ type options struct {
 	services       []ServiceRegistrar
 	gateways       []GatewayRegistrar
 	directGateways []DirectRegistrar
+	middlewares    []runtime.Middleware
 	mounts         []mount
 	unary          []grpc.UnaryServerInterceptor
 	stream         []grpc.StreamServerInterceptor
@@ -94,6 +95,20 @@ func WithGateway(register GatewayRegistrar) Option {
 // 服务用 NewRPCRESTServer。
 func WithDirectGateway(register DirectRegistrar) Option {
 	return func(o *options) { o.directGateways = append(o.directGateways, register) }
+}
+
+// WithMiddleware 追加自定义 HTTP 中间件，挂在内置链（访问日志 → 鉴权）之内、
+// handler 之外，按传入顺序由外到内执行，可重复调用以追加多个——位置与 gRPC 侧的
+// WithUnaryInterceptor 一致，故同一套横切关注点换形态时的相对次序不变。
+//
+// 中间件由 ServeMux.Handle 在路由注册时挂上，只包住 gateway 路由：/healthz 与
+// WithMount 挂载点不经此，探针与文档页因此保持免鉴权。
+//
+// 只有 NewRESTServer 接受它——该形态没有 gRPC 拦截器可挂。环回双端口形态不开这个
+// 口子：那里的横切关注点写成 gRPC 拦截器经 WithUnaryInterceptor 注入，HTTP 与 gRPC
+// 两种协议一并覆盖，而 HTTP 专用中间件只盖住一半，是会静默漏掉东西向流量的陷阱。
+func WithMiddleware(middlewares ...runtime.Middleware) Option {
+	return func(o *options) { o.middlewares = append(o.middlewares, middlewares...) }
 }
 
 // WithMount 在 gateway 之外挂一个 HTTP 处理器（如 /docs 文档出口）。

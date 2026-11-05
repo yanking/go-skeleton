@@ -31,7 +31,8 @@
 // （WithTracerProvider 才挂）。经 gateway 环回的 HTTP 流量穿过同一条链。
 //
 // 直连 REST 形态没有 gRPC 拦截器可挂，等价链路经 runtime.WithMiddlewares 组装在
-// 每条 gateway 路由上，链序相同（访问日志在外、鉴权在内）：出口翻译由 mux 的错误
+// 每条 gateway 路由上，链序相同（访问日志在外、鉴权在内，WithMiddleware 注入的自定义
+// 中间件再在其内、handler 之外）：出口翻译由 mux 的错误
 // 处理器承担，与环回形态共用同一渲染，客户端契约一致；鉴权策略收到的 method 参数
 // 是 HTTP 路径而非 gRPC 方法名（细节见 middleware.go）。otel 经 otelhttp 包住整个
 // mux（WithTracerProvider 才挂），入站 W3C traceparent 也因此得以提取续链——环回
@@ -174,6 +175,8 @@ func validateRPC(cfg Config, o *options) {
 		panic(errors.New("装配 transport: WithDirectGateway 属直连 REST 形态（NewRESTServer），纯 gRPC 形态没有 HTTP 出口"))
 	case len(o.mounts) > 0:
 		panic(errors.New("装配 transport: 挂载点需要 HTTP 出口——双端口形态用 NewRPCRESTServer，直连形态用 NewRESTServer"))
+	case len(o.middlewares) > 0:
+		panic(errors.New("装配 transport: WithMiddleware 是 HTTP 中间件，纯 gRPC 形态没有 HTTP 出口——横切关注点用 WithUnaryInterceptor"))
 	}
 }
 
@@ -188,6 +191,8 @@ func validateRPCREST(cfg Config, o *options) {
 		panic(errors.New("装配 transport: 配了 http_addr 却没有 WithGateway，HTTP 端口上不会有任何路由"))
 	case len(o.directGateways) > 0:
 		panic(errors.New("装配 transport: WithDirectGateway 属直连 REST 形态（NewRESTServer），环回形态的路由用 WithGateway"))
+	case len(o.middlewares) > 0:
+		panic(errors.New("装配 transport: WithMiddleware 属直连 REST 形态（NewRESTServer）——环回形态的横切关注点写成 gRPC 拦截器经 WithUnaryInterceptor 注入，HTTP 与 gRPC 一并覆盖；只挂 HTTP 中间件会漏掉东西向流量"))
 	}
 	validateMounts(o.mounts)
 }
@@ -311,6 +316,8 @@ func (s *Server) attachDirectHTTP(ctx context.Context, addr string, o *options) 
 	if o.authenticator != nil {
 		middlewares = append(middlewares, directAuth(o.authenticator))
 	}
+	// 自定义中间件排在内置链之内、handler 之外，与 gRPC 侧自定义拦截器的位置一致。
+	middlewares = append(middlewares, o.middlewares...)
 	gwMux := runtime.NewServeMux(
 		runtime.WithErrorHandler(gatewayErrorHandler),
 		runtime.WithIncomingHeaderMatcher(incomingHeaderMatcher),

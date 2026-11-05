@@ -46,7 +46,7 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 
 	// 注入即自动挂拦截链（出口翻译 → 访问日志 → 鉴权），顺序由 transport 固定；
 	// 需要鉴权时加 transport.WithAuthenticator(...)，内置策略见 transport.FixedBearerAuth。
-	srv := transport.NewServer(ctx, c.Transport,
+	srv := transport.NewRPCServer(c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
 		transport.WithLogger(logger),
 		// 业务 pb 就绪后放开注册，错误出口已由 transport 统一翻译，handler 只管返回 errcode：

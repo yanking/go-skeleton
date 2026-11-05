@@ -1,11 +1,13 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -21,7 +23,7 @@ import (
 	"github.com/yanking/go-skeleton/pkg/errcode"
 )
 
-func TestNewServerPanics(t *testing.T) {
+func TestNewRPCServerPanics(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  Config
@@ -29,27 +31,66 @@ func TestNewServerPanics(t *testing.T) {
 	}{
 		{name: "grpc_addr 为空", cfg: Config{}},
 		{
-			name: "只配 http_addr 没有 grpc",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			name: "纯 gRPC 形态却配了 http_addr",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+		},
+		{
+			name: "环回路由注册在纯 gRPC 形态",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
 			opts: []Option{WithGateway(noopGateway)},
 		},
 		{
-			name: "配了 http_addr 却没有 gateway",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			name: "直连路由注册在纯 gRPC 形态",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway)},
 		},
 		{
 			name: "挂载点没有 HTTP 出口",
 			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
 			opts: []Option{WithMount("/docs", http.NewServeMux())},
 		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Error("want panic, got 正常返回")
+				}
+			}()
+			NewRPCServer(tt.cfg, tt.opts...)
+		})
+	}
+}
+
+func TestNewRPCRESTServerPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		opts []Option
+	}{
+		{
+			name: "grpc_addr 为空",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithGateway(noopGateway)},
+		},
+		{name: "双端口形态缺 http_addr", cfg: Config{GRPCAddr: "127.0.0.1:0"}},
+		{
+			name: "配了 http_addr 却没有 gateway",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+		},
+		{
+			name: "直连路由注册在环回形态",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithGateway(noopGateway), WithDirectGateway(noopDirectGateway)},
+		},
 		{
 			name: "挂载模式占用根路径",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
 			opts: []Option{WithGateway(noopGateway), WithMount("/", http.NewServeMux())},
 		},
 		{
 			name: "挂载模式不以 / 开头",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
 			opts: []Option{WithGateway(noopGateway), WithMount("docs", http.NewServeMux())},
 		},
 	}
@@ -60,14 +101,66 @@ func TestNewServerPanics(t *testing.T) {
 					t.Error("want panic, got 正常返回")
 				}
 			}()
-			NewServer(context.Background(), tt.cfg, tt.opts...)
+			NewRPCRESTServer(context.Background(), tt.cfg, tt.opts...)
+		})
+	}
+}
+
+func TestNewRESTServerPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		opts []Option
+	}{
+		{name: "http_addr 为空", cfg: Config{}},
+		{
+			name: "直连形态却配了 grpc_addr",
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway)},
+		},
+		{
+			name: "没有直连路由",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+		},
+		{
+			name: "环回路由注册在直连形态",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway), WithGateway(noopGateway)},
+		},
+		{
+			name: "gRPC 服务注册在直连形态",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway), WithService(registerEcho)},
+		},
+		{
+			name: "gRPC 拦截器注册在直连形态",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway),
+				WithUnaryInterceptor(func(context.Context, any, *grpc.UnaryServerInfo, grpc.UnaryHandler) (any, error) {
+					return nil, nil
+				})},
+		},
+		{
+			name: "挂载模式占用根路径",
+			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			opts: []Option{WithDirectGateway(noopDirectGateway), WithMount("/", http.NewServeMux())},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Error("want panic, got 正常返回")
+				}
+			}()
+			NewRESTServer(context.Background(), tt.cfg, tt.opts...)
 		})
 	}
 }
 
 // 纯 gRPC 形态：不配 http_addr 即不监听 HTTP，只有 gRPC 一个端口。
 func TestServerGRPCOnly(t *testing.T) {
-	srv := NewServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0"})
+	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0"})
 	if srv.http != nil || srv.httpLn != nil || srv.conn != nil {
 		t.Error("未配 http_addr 不应装配 HTTP 出口")
 	}
@@ -84,7 +177,7 @@ func TestServerGRPCOnly(t *testing.T) {
 
 // 双协议形态：gRPC 与 HTTP 各自监听一个端口，HTTP 侧只是 gateway 代理——请求经环回
 // 打回本进程 gRPC，因此两种协议穿过同一条拦截链、共用同一套错误出口。
-func TestServerDualProtocol(t *testing.T) {
+func TestServerRPCREST(t *testing.T) {
 	docs := http.NewServeMux()
 	docs.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "docs-root")
@@ -93,7 +186,7 @@ func TestServerDualProtocol(t *testing.T) {
 		_, _ = io.WriteString(w, "docs-subtree")
 	})
 
-	srv := NewServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
 		WithService(registerEcho),
 		WithGateway(echoGateway),
 		WithMount("/docs", docs),
@@ -179,7 +272,7 @@ func TestServerDualProtocol(t *testing.T) {
 // 鉴权对两种协议同时生效：HTTP 的 Authorization 头经 gateway 转成 metadata，
 // 与原生 gRPC 调用穿过同一个拦截器；探针与 reflection 恒定放行。
 func TestServerAuthCoversBothProtocols(t *testing.T) {
-	srv := NewServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
 		WithAuthenticator(FixedBearerAuth("tok")),
 		WithService(registerEcho),
 		WithGateway(echoGateway),
@@ -239,6 +332,151 @@ func TestClosedOnStop(t *testing.T) {
 	}
 }
 
+// 直连 REST 形态：handler 实现直接注册进 gateway 路由，无 gRPC 服务器、无环回。
+// 出口翻译由 mux 的错误处理器承担、访问日志与鉴权经 middleware 挂上——
+// 错误体契约与环回形态（TestServerRPCREST 的 errcode 两个子测试）逐字一致。
+func TestServerRESTDirect(t *testing.T) {
+	docs := http.NewServeMux()
+	docs.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "docs-root")
+	})
+	docs.HandleFunc("/docs/spec.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "docs-subtree")
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+		WithLogger(logger),
+		WithDirectGateway(directEchoGateway),
+		WithMount("/docs", docs),
+	)
+	if srv.grpc != nil || srv.grpcLn != nil || srv.conn != nil {
+		t.Error("直连形态不应装配 gRPC 服务器与环回连接")
+	}
+	served := start(t, srv)
+	defer stop(t, srv, served)
+
+	base := "http://" + srv.httpLn.Addr().String()
+	tests := []struct {
+		name, path, wantBody string
+		wantStatus           int
+	}{
+		{name: "探针", path: "/healthz", wantStatus: http.StatusOK},
+		{name: "挂载点精确模式", path: "/docs", wantStatus: http.StatusOK, wantBody: "docs-root"},
+		{name: "挂载点子树模式", path: "/docs/spec.json", wantStatus: http.StatusOK, wantBody: "docs-subtree"},
+		// 直接函数调用 handler，不经环回——出口契约与环回形态一致。
+		{name: "直连路由成功", path: "/v1/ping", wantStatus: http.StatusOK, wantBody: "SERVING"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, body := get(t, base+tt.path)
+			if code != tt.wantStatus {
+				t.Errorf("状态 got %d, want %d (body %q)", code, tt.wantStatus, body)
+			}
+			if tt.wantBody != "" && !strings.Contains(body, tt.wantBody) {
+				t.Errorf("body got %q, want 含 %q", body, tt.wantBody)
+			}
+		})
+	}
+
+	t.Run("errcode 渲染为统一 JSON 且 HTTP 状态按 gRPC 码映射", func(t *testing.T) {
+		code, body := get(t, base+"/v1/fail")
+		if code != http.StatusNotFound {
+			t.Errorf("状态 got %d, want 404 (body %q)", code, body)
+		}
+		var got struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("body 非 JSON: %q", body)
+		}
+		if got.Code != errcode.ErrNotFound.Code || got.Message != errcode.ErrNotFound.Message {
+			t.Errorf("JSON got %+v, want code=%d message=%q",
+				got, errcode.ErrNotFound.Code, errcode.ErrNotFound.Message)
+		}
+		if strings.Contains(body, cause) {
+			t.Errorf("原始错误不得外泄, got %q", body)
+		}
+	})
+
+	t.Run("裸错误兜成内部错误", func(t *testing.T) {
+		code, body := get(t, base+"/v1/boom")
+		if code != http.StatusInternalServerError {
+			t.Errorf("状态 got %d, want 500 (body %q)", code, body)
+		}
+		var got struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("body 非 JSON: %q", body)
+		}
+		if got.Code != errcode.ErrInternal.Code || got.Message != errcode.ErrInternal.Message {
+			t.Errorf("JSON got %+v, want code=%d message=%q",
+				got, errcode.ErrInternal.Code, errcode.ErrInternal.Message)
+		}
+		if strings.Contains(body, rawCause) {
+			t.Errorf("原始错误不得外泄, got %q", body)
+		}
+	})
+
+	// 访问日志的 code 用与 gRPC 侧同一套码字表：renderError 经响应写回原把翻译结果
+	// 通知本 middleware；失败时原始错误也进日志（err 字段）。
+	t.Run("访问日志记录出口翻译后的码", func(t *testing.T) {
+		logBuf.Reset()
+		get(t, base+"/v1/ping")
+		// TextHandler 会给含空格的值加引号，断言只认不依赖引用形态的片段。
+		if s := logBuf.String(); !strings.Contains(s, "GET /v1/ping") || !strings.Contains(s, "code=OK") {
+			t.Errorf("成功访问日志 got %q", s)
+		}
+		logBuf.Reset()
+		get(t, base+"/v1/fail")
+		if s := logBuf.String(); !strings.Contains(s, "code=NotFound") || !strings.Contains(s, cause) {
+			t.Errorf("失败访问日志 got %q", s)
+		}
+	})
+}
+
+// 直连形态的鉴权：与环回形态（TestServerAuthCoversBothProtocols）同一策略、同一拒绝体；
+// /healthz 在 gateway 路由之外，不经 middleware，恒免鉴权。
+func TestServerRESTAuth(t *testing.T) {
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+		WithAuthenticator(FixedBearerAuth("tok")),
+		WithDirectGateway(directEchoGateway),
+	)
+	served := start(t, srv)
+	defer stop(t, srv, served)
+
+	base := "http://" + srv.httpLn.Addr().String()
+	t.Run("无凭证被拒且带业务码", func(t *testing.T) {
+		code, body := getWithAuth(t, base+"/v1/ping", "")
+		if code != http.StatusUnauthorized {
+			t.Errorf("got %d %q, want 401", code, body)
+		}
+		if !strings.Contains(body, fmt.Sprint(errcode.ErrUnauthenticated.Code)) {
+			t.Errorf("body 应含业务码 %d, got %q", errcode.ErrUnauthenticated.Code, body)
+		}
+	})
+	t.Run("凭证错误被拒", func(t *testing.T) {
+		if code, body := getWithAuth(t, base+"/v1/ping", "Bearer wrong"); code != http.StatusUnauthorized {
+			t.Errorf("got %d %q, want 401", code, body)
+		}
+	})
+	t.Run("带对凭证放行", func(t *testing.T) {
+		if code, body := getWithAuth(t, base+"/v1/ping", "Bearer tok"); code != http.StatusOK {
+			t.Errorf("got %d %q, want 200", code, body)
+		}
+	})
+	t.Run("探针免鉴权", func(t *testing.T) {
+		if code, _ := get(t, base+"/healthz"); code != http.StatusOK {
+			t.Errorf("探针应免鉴权, got %d", code)
+		}
+	})
+}
+
 // ---- 测试替身：手写一个最小 gRPC 服务，只为在 pkg 内造出「非探针」的业务方法 ----
 // 未注册的方法不会经过拦截器（grpc-go 直接回 Unimplemented），故鉴权与错误出口
 // 这类拦截链行为必须挂在真实注册的方法上才测得到。用 health 的 pb 类型当载荷，
@@ -290,6 +528,32 @@ func registerEcho(s *grpc.Server) { s.RegisterService(&echoDesc, nil) }
 
 // noopGateway 不注册路由，只用于选项校验类用例。
 func noopGateway(context.Context, *runtime.ServeMux, *grpc.ClientConn) error { return nil }
+
+// noopDirectGateway 不注册路由，只用于选项校验类用例。
+func noopDirectGateway(context.Context, *runtime.ServeMux) error { return nil }
+
+// directEchoGateway 模拟 pb 生成的 RegisterXxxHandlerServer：直接函数调用、错误经
+// HTTPError 交给 mux 的错误处理器——流出路径与生成代码一致。middleware 由
+// mux.Handle 在路由注册时挂上，与生成代码同一入口，故这里的路由同样穿过访问日志与鉴权。
+func directEchoGateway(_ context.Context, mux *runtime.ServeMux) error {
+	route := func(path string, ret error) error {
+		return mux.HandlePath("GET", path, func(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+			if ret != nil {
+				_, outbound := runtime.MarshalerForRequest(mux, r)
+				runtime.HTTPError(r.Context(), mux, outbound, w, r, ret)
+				return
+			}
+			_, _ = io.WriteString(w, grpc_health_v1.HealthCheckResponse_SERVING.String())
+		})
+	}
+	if err := route("/v1/ping", nil); err != nil {
+		return err
+	}
+	if err := route("/v1/fail", errcode.Wrap(errors.New(cause), errcode.ErrNotFound)); err != nil {
+		return err
+	}
+	return route("/v1/boom", errors.New(rawCause))
+}
 
 // echoGateway 手写两条等价于 pb 生成代码的路由：AnnotateContext 把 HTTP 头按
 // incomingHeaderMatcher 转成 gRPC metadata（生成代码的必经一步，鉴权头靠它过桥），

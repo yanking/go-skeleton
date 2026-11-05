@@ -158,14 +158,27 @@ func nonOKStatus(c codes.Code) codes.Code {
 	return c
 }
 
-// gatewayErrorHandler 把 gRPC status 错误渲染为仓库统一 JSON 形态：
-// {"code":<业务码>,"message":<用户可读消息>}，HTTP 状态用 grpc-gateway 的标准映射。
-// 业务码从 status details 的 ErrorInfo.Reason 提取（errCodeToStatus 放进去的）；
-// 取不到按通用内部错误处理，原始细节不外泄。
+// gatewayErrorHandler 把错误渲染为仓库统一 JSON 形态：{"code":<业务码>,"message":<用户可读消息>}，
+// HTTP 状态用 grpc-gateway 的标准映射。两种 HTTP 出口共用它：环回形态的错误已经过
+// gRPC 拦截器翻译，直连形态的原始错误由 renderError 里的 toStatusErr 兜底——对已是
+// status 的错误再翻一次是幂等的（放行码原样、故障码消息已是通用文案），环回路径不受影响。
 func gatewayErrorHandler(_ context.Context, _ *runtime.ServeMux, _ runtime.Marshaler,
 	w http.ResponseWriter, _ *http.Request, err error,
 ) {
-	st := status.Convert(err)
+	renderError(w, err)
+}
+
+// renderError 按出口约定翻译错误（toStatusErr）并渲染为统一 JSON 形态。除 mux 的
+// 错误处理器外，直连形态的鉴权拒绝也走这里——它拿不到 mux 的错误处理流程，同一份
+// 渲染两处共用，客户端契约不变。业务码从 status details 的 ErrorInfo.Reason 提取
+// （statusFromCode 放进去的），取不到按通用内部错误处理，原始细节不外泄。
+// 翻译出的 gRPC 码顺手记进响应写回原（accessWriter，若有）供直连形态的访问日志
+// 取用，免去再翻一次；w 不带该能力时（环回形态）静默跳过。
+func renderError(w http.ResponseWriter, err error) {
+	st := status.Convert(toStatusErr(err))
+	if acc, ok := w.(interface{ recordAccess(codes.Code, error) }); ok {
+		acc.recordAccess(st.Code(), err)
+	}
 	code := errcode.ErrInternal.Code
 	for _, d := range st.Details() {
 		if info, ok := d.(*errdetails.ErrorInfo); ok {

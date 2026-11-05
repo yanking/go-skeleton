@@ -22,7 +22,7 @@ bash .agents/skills/new-module/scripts/new_module.sh <svc> <module>
 1. **划错误码子段**：AGENTS.md 错误码表本服务那一行，给新模块划一个未用的千位子段。
 2. **写 proto 契约**（服务有传输段时）：一个模块一个文件 `api/<svc>/v1/<module>.proto`，各自声明一个 gRPC service；注释格式按 `.agents/go-style.md`「proto 注释」，写完 `make proto`。
 3. **填业务实体**：各层填什么见其 doc.go。要用别的模块的能力，在本模块的 service 里声明窄接口，由 initial 传入对方 service 的实现；不引用对方的 handler、repo、model、job。
-4. **接线**：在 `cmd/<svc>/initial` 的 createServer 里构造本模块的 repo → service → handler，`WithService` 追加一次，服务有 HTTP 出口时 `WithGateway` 也追加一次；同层包按 `<模块><层>` 起别名（如 `orderservice`）。服务有自己的鉴权拦截器时，新方法默认要登录，要公开就按该拦截器的规则登记。
+4. **接线**：在 `cmd/<svc>/initial` 的 createServer 里构造本模块的 repo → service → handler，`WithService` 追加一次，服务是双端口形态（`NewRPCRESTServer`）时 `WithGateway` 也追加一次；同层包按 `<模块><层>` 起别名（如 `orderservice`）。服务有自己的鉴权拦截器时，新方法默认要登录，要公开就按该拦截器的规则登记。
 5. **建表**（有库时）：`make migrate-create SVC=<svc> NAME=create_<表名>`，迁移仍放 `migrations/<svc>/`。
 6. **验证**：`make check` 全绿——其中 `test/arch` 的架构测试检查模块边界。
 

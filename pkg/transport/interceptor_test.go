@@ -20,17 +20,19 @@ func TestFixedBearerAuth(t *testing.T) {
 	ctx := metadata.NewIncomingContext(context.Background(),
 		metadata.Pairs("authorization", "Bearer tok"))
 
-	if err := authn(ctx, "/user.v1.UserService/GetUser"); err != nil {
+	if got, err := authn(ctx, "/user.v1.UserService/GetUser"); err != nil {
 		t.Errorf("凭证正确应放行, got %v", err)
+	} else if got != ctx {
+		t.Error("固定凭证策略无身份可注入，应原样返回传入的 ctx")
 	}
 
 	bad := metadata.NewIncomingContext(context.Background(),
 		metadata.Pairs("authorization", "Bearer wrong"))
-	if err := authn(bad, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+	if _, err := authn(bad, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 		t.Errorf("凭证错误应拒绝, got %v", err)
 	}
 
-	if err := authn(context.Background(), "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+	if _, err := authn(context.Background(), "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 		t.Errorf("缺凭证应拒绝, got %v", err)
 	}
 }
@@ -55,7 +57,7 @@ func TestFixedBearerAuthEmptyToken(t *testing.T) {
 			if c.header != "" {
 				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", c.header))
 			}
-			if err := authn(ctx, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+			if _, err := authn(ctx, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 				t.Errorf("token 为空时应一律拒绝, got %v", err)
 			}
 		})
@@ -110,7 +112,7 @@ func TestPeerAddrUnknown(t *testing.T) {
 }
 
 func TestUnaryAuth(t *testing.T) {
-	alwaysReject := func(context.Context, string) error { return errcode.ErrUnauthenticated }
+	alwaysReject := func(context.Context, string) (context.Context, error) { return nil, errcode.ErrUnauthenticated }
 	unaryInfo := func(method string) *grpc.UnaryServerInfo { return &grpc.UnaryServerInfo{FullMethod: method} }
 	called := false
 	handler := func(context.Context, any) (any, error) { called = true; return "ok", nil }
@@ -124,7 +126,7 @@ func TestUnaryAuth(t *testing.T) {
 
 	t.Run("业务方法凭策略放行或拒绝", func(t *testing.T) {
 		called = false
-		if _, err := unaryAuth(func(context.Context, string) error { return nil })(
+		if _, err := unaryAuth(func(ctx context.Context, _ string) (context.Context, error) { return ctx, nil })(
 			context.Background(), nil, unaryInfo("/user.v1.UserService/GetUser"), handler); err != nil || !called {
 			t.Errorf("策略放行应到 handler, got err=%v called=%v", err, called)
 		}
@@ -143,7 +145,7 @@ type stubStream struct{ grpc.ServerStream }
 func (stubStream) Context() context.Context { return context.Background() }
 
 func TestStreamAuth(t *testing.T) {
-	alwaysReject := func(context.Context, string) error { return errcode.ErrUnauthenticated }
+	alwaysReject := func(context.Context, string) (context.Context, error) { return nil, errcode.ErrUnauthenticated }
 	called := false
 	handler := func(any, grpc.ServerStream) error { called = true; return nil }
 	info := &grpc.StreamServerInfo{FullMethod: "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"}

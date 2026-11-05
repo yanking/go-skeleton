@@ -48,7 +48,8 @@ func directAccessLog(logger *slog.Logger) runtime.Middleware {
 // 策略。与 gRPC 侧的两点差异：Authorization 从 HTTP 头取并就地转成 incoming
 // metadata（middleware 在注解之前运行，metadata 注解发生在被包的 handler 里）；
 // 策略收到的 method 参数是 HTTP 路径而非 gRPC 方法名——按方法名分支的策略须知
-// 此差异。拒绝时按统一错误体渲染，与业务错误同一出口。
+// 此差异。拒绝时按统一错误体渲染，与业务错误同一出口；放行时策略返回的 ctx 经
+// r.WithContext 带给 handler，身份注入因此在直连形态同样生效。
 func directAuth(a Authenticator) runtime.Middleware {
 	return func(next runtime.HandlerFunc) runtime.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request, pathParams map[string]string) {
@@ -56,11 +57,15 @@ func directAuth(a Authenticator) runtime.Middleware {
 			if token := r.Header.Get("Authorization"); token != "" {
 				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", token))
 			}
-			if err := authorize(ctx, a, r.URL.Path); err != nil {
+			ctx, err := authorize(ctx, a, r.URL.Path)
+			if err != nil {
 				renderError(w, err)
 				return
 			}
-			next(w, r, pathParams)
+			// 策略注入的身份要带给 handler。为取凭证临时注入的 incoming metadata
+			// 顺带也带了下去，无害：生成代码的 AnnotateContext 用
+			// metadata.NewIncomingContext 按请求头整体替换，不会叠出重复键。
+			next(w, r.WithContext(ctx), pathParams)
 		}
 	}
 }

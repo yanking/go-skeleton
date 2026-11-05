@@ -46,8 +46,31 @@ func BearerToken(ctx context.Context) (string, bool) {
 }
 
 // Authenticator 鉴权策略：由服务注入（pkg 不含业务概念）。
-// 返回非 nil 即拒绝（错误应为 errcode 或 status 形态，出口层会翻译），nil 放行。
-type Authenticator func(ctx context.Context, fullMethod string) error
+// 返回非 nil error 即拒绝（错误应为 errcode 或 status 形态，出口层会翻译）。
+//
+// 放行时返回的 ctx 取代原 ctx 交给后续链路与 handler——策略因此也是注入已认证
+// 身份的地方：解析凭证与构造身份本是同一次工作，拆成「鉴权」与「取身份」两个钩子
+// 必然解析两遍，两边还可能算出不一致的结果。身份的类型与 ctx 键由服务自己定义
+// （pkg 不含业务概念），策略里 context.WithValue 塞进去即可：
+//
+//	func NewAuth(repo UserRepo) transport.Authenticator {
+//	    return func(ctx context.Context, _ string) (context.Context, error) {
+//	        token, ok := transport.BearerToken(ctx)
+//	        if !ok {
+//	            return nil, errcode.ErrUnauthenticated
+//	        }
+//	        u, err := repo.ByToken(ctx, token)
+//	        if err != nil {
+//	            return nil, errcode.Wrap(err, errcode.ErrUnauthenticated)
+//	        }
+//	        return WithUser(ctx, u), nil // WithUser 是服务自己的 ctx 键
+//	    }
+//	}
+//
+// 放行但无身份可注入时返回传入的 ctx；返回 nil ctx 等同于返回原 ctx（由 authorize
+// 兜住），不会把 nil 传给 handler。豁免的方法与路径不经策略，handler 因此必须
+// 容忍「ctx 里没有身份」——拿身份的那一侧要判存在，不能假定一定有。
+type Authenticator func(ctx context.Context, fullMethod string) (context.Context, error)
 
 // publicMethodPrefixes 无需鉴权的方法前缀：health 探针与 reflection——
 // 探针带不上凭证，拦它们等于让编排系统误判实例死亡。
@@ -61,24 +84,26 @@ var publicMethodPrefixes = []string{
 // （fail-closed，只有探针放行），避免配置缺省时把 API 裸奔上线。
 // 比对用 subtle.ConstantTimeCompare，耗时不随匹配上的前缀长度变化。
 func FixedBearerAuth(token string) Authenticator {
-	return func(ctx context.Context, _ string) error {
+	return func(ctx context.Context, _ string) (context.Context, error) {
 		// 空 token 是「配置漏填」而非「本服务不要凭证」，必须在比对之前拦掉：
 		// 客户端发一个空的 Bearer 凭证就会与空配置比中，那正是本策略要防的裸奔。
 		if token == "" {
-			return errcode.ErrUnauthenticated
+			return nil, errcode.ErrUnauthenticated
 		}
 		got, ok := BearerToken(ctx)
 		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			return errcode.ErrUnauthenticated
+			return nil, errcode.ErrUnauthenticated
 		}
-		return nil
+		// 固定凭证只证明「调用方持有本服务的 token」，没有身份可注入，原样返回。
+		return ctx, nil
 	}
 }
 
 // unaryAuth gRPC Unary 鉴权拦截器。
 func unaryAuth(a Authenticator) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if err := authorize(ctx, a, info.FullMethod); err != nil {
+		ctx, err := authorize(ctx, a, info.FullMethod)
+		if err != nil {
 			return nil, err
 		}
 		return handler(ctx, req)
@@ -88,20 +113,44 @@ func unaryAuth(a Authenticator) grpc.UnaryServerInterceptor {
 // streamAuth gRPC Stream 鉴权拦截器，放行规则与 unaryAuth 一致。
 func streamAuth(a Authenticator) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if err := authorize(ss.Context(), a, info.FullMethod); err != nil {
+		ctx, err := authorize(ss.Context(), a, info.FullMethod)
+		if err != nil {
 			return err
+		}
+		if ctx != ss.Context() {
+			ss = &authStream{ServerStream: ss, ctx: ctx}
 		}
 		return handler(srv, ss)
 	}
 }
 
-func authorize(ctx context.Context, a Authenticator, fullMethod string) error {
+// authStream 把鉴权策略返回的 ctx 带给流式 handler。grpc.ServerStream 的 ctx 由
+// grpc-go 持有、没有替换入口，只能包一层覆写 Context()——策略没动 ctx 时不包，
+// 不给未用到身份注入的服务凭空加一层间接。
+type authStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *authStream) Context() context.Context { return s.ctx }
+
+// authorize 跑豁免判断与鉴权策略，返回要交给后续链路的 ctx。
+// 策略放行却返回 nil ctx 时退回传入的 ctx：那是最容易写出的疏漏（return nil, nil），
+// 让它等价于「什么也不注入」，而不是把 nil ctx 传下去在 handler 里炸开。
+func authorize(ctx context.Context, a Authenticator, fullMethod string) (context.Context, error) {
 	for _, prefix := range publicMethodPrefixes {
 		if strings.HasPrefix(fullMethod, prefix) {
-			return nil
+			return ctx, nil
 		}
 	}
-	return a(ctx, fullMethod)
+	next, err := a(ctx, fullMethod)
+	if err != nil {
+		return nil, err
+	}
+	if next == nil {
+		return ctx, nil
+	}
+	return next, nil
 }
 
 // unaryAccessLog gRPC Unary 访问日志拦截器：成功 Info、失败 Warn，

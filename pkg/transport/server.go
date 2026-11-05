@@ -26,7 +26,8 @@
 // 只进访问日志）；其后是访问日志（WithLogger 才挂：成功 Info、失败 Warn，记方法、
 // 来源地址、状态码与耗时，trace_id 由日志钩子附带）与鉴权（WithAuthenticator 才挂：
 // health/reflection 前缀豁免——拦探针会让编排系统误判实例死亡；策略由服务注入，
-// FixedBearerAuth 做固定 token 比对、空 token 全拒绝），再后是 WithUnaryInterceptor /
+// 放行时可经返回的 ctx 注入已认证身份，FixedBearerAuth 做固定 token 比对、
+// 空 token 全拒绝），再后是 WithUnaryInterceptor /
 // WithStreamInterceptor 传入的自定义拦截器；otel 遥测另经 StatsHandler 挂载
 // （WithTracerProvider 才挂）。经 gateway 环回的 HTTP 流量穿过同一条链。
 //

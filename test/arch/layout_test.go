@@ -255,7 +255,7 @@ func (l layout) violationOf(rel, top, mod, target string) string {
 		return fmt.Sprintf("%s：服务级共享包 %s 引用了模块 %s，共享包不能反过来依赖模块", rel, top, dst)
 	case mod == "":
 		return "" // 层目录却定不出模块：布局本身已报违规，不再叠加文件级违规
-	case dst != mod && !(layer == "service" && sub == ""):
+	case dst != mod && (layer != "service" || sub != ""):
 		return fmt.Sprintf("%s：模块 %s 引用了模块 %s 的 %s，跨模块只能经对方的 service 包", rel, mod, dst, target)
 	}
 	return ""

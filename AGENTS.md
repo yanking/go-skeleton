@@ -50,7 +50,6 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `pkg/redis` | go-redis 客户端,单机/集群经 addrs 数量自动推断,内嵌 `UniversalClient` 直接调用 |
 | `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,连接池逐 Client 独立;注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 只留 scheme://host/path,报文不记) |
 | `pkg/transport` | 对外传输组件,三种形态构造器:`NewRPCServer` 纯 gRPC / `NewRPCRESTServer` gRPC + gateway 环回双端口 / `NewRESTServer` 直连 REST(pb 契约直出 HTTP,无环回,不支持流式方法)。拦截链含 errcode 出口翻译、访问日志与鉴权(otel 经 StatsHandler/otelhttp 挂载),链序见包注释 |
-| `pkg/httpserver` | 基于 gin 的 HTTP 服务组件(http 形态):只开一个 HTTP 端口,路由由服务自己用 gin 注册;错误体 `{code,message}`、HTTP 状态映射、访问日志、链路追踪与 `pkg/transport` 对齐,handler 经 `Handle` 返回 error 由本包统一翻译 |
 | `pkg/queue` | asynq 任务队列薄封装:Client 入队 + Worker 消费(实现 app.Component) |
 
 本表只是索引;使用约束(锁读纪律、停机顺序、全局状态、装配期行为)以各包 Go doc 注释为准,改用法前先读。
@@ -99,9 +98,9 @@ Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪
 
 两个端口各自监听:暴露范围、mesh 协议标注与网络策略可分别配置。形态是服务的结构性决策,同一份二进制不按部署切换——要改形态是代码改动。
 
-http 形态的服务(`pkg/httpserver`)只开 HTTP 端口,路由手写、不经 proto,用于对外的统一入口这类纯 HTTP 场景;它调内部服务仍走 gRPC。new-service 技能还没有这个变体与直连 REST 变体,入口照 rpc 变体的骨架把 `transport.NewRPCServer` 换成 `httpserver.New` 或 `transport.NewRESTServer`(后者经 `WithDirectGateway` 注册 pb)。
+new-service 技能还没有直连 REST 变体,入口照 rpc 变体的骨架把 `transport.NewRPCServer` 换成 `transport.NewRESTServer`,并经 `WithDirectGateway` 注册 pb。
 
-接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。http 形态的服务没有 proto,文档由 swag 从 handler 注释生成 OpenAPI 3.1(`make apidoc SVC=<svc>`,落到 `openapi/<svc>/v1/`),同样经 `openapi` 包挂到 `/docs`(仓里还没有该包时从 new-service 的 assets 拷入)。
+接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。
 
 数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 

@@ -79,6 +79,10 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 
 **层名是封闭集合**(`handler`/`service`/`repo`/`model`/`job`),模块名是业务域名字。所以 `internal/user/service/wallet/` 里 `service` 是层、`wallet` 是模块;`internal/user/auth/` 这种不叫层名的一级目录是服务级共享包,不是层也不是模块。
 
+**包名取层名,不取目录名**:`internal/<svc>/service/<module>/` 里的包声明为 `package service`。这是对 Go「包名随目录名」惯例的刻意例外——按目录名的话同一模块的四层全叫 `<module>`,模块内部 service 引用 model 就得起别名;取层名则模块内零别名(`model.Account`、`service.RegisterIn`),只有 `cmd/<svc>/initial` 里跨模块的同层包撞名,按下面的 `<模块><层>` 起即可。new-service/new-module 渲染的 `doc.go` 已按此声明。
+
+**跨模块共用的东西只能上移到服务级共享包**:层目录本身不放 Go 文件、层内又不另建子包,所以各模块 repo 共用的错误哨兵、共用的鉴权拦截器之类没法待在层里,一律上移为 `internal/<svc>/<pkg>/`。这是层优先的代价,起名时按它提供的能力命名(如 `dberr`、`authn`),不要用层名。
+
 模块内部的职责与错误流向同平铺——平铺服务就是只有一个模块、且各层不单列模块子目录。平铺服务要加第二个业务域时,先把现有代码迁进模块子目录(每层各建一个)再写新模块:越晚迁,要挪的代码越多。已分模块的服务加业务域用 `.agents/skills/new-module` 技能。
 
 模块边界:

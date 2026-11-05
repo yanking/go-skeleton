@@ -108,7 +108,7 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 	// 注入即自动挂拦截链（出口翻译 → 访问日志），顺序由 transport 固定；
 	// handler 只管返回 errcode，出口翻译由拦截器统一处理。
 	// 商户鉴权走的是报文签名（service.Authenticate），不是传输层 Authenticator。
-	srv := transport.NewServer(ctx, c.Transport,
+	srv := transport.NewRPCRESTServer(ctx, c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
 		transport.WithLogger(logger),
 		transport.WithService(func(s *grpc.Server) {

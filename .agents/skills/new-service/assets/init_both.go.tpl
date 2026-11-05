@@ -47,12 +47,12 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 
 	// 注入即自动挂拦截链（出口翻译 → 访问日志 → 鉴权），顺序由 transport 固定；
 	// 需要鉴权时加 transport.WithAuthenticator(...)，内置策略见 transport.FixedBearerAuth。
-	srv := transport.NewServer(ctx, c.Transport,
+	// 以纯 gRPC 起步：业务 pb 就绪后，构造器换成 NewRPCRESTServer（签名多一个 ctx），
+	// 并把 configs/__svc__.yaml 的 http_addr 与下面三行注释一并放开，双协议形态即成型。
+	// 两步必须同时做——NewRPCRESTServer 必配 http_addr，先放开端口而没有路由会在装配期报错。
+	srv := transport.NewRPCServer(c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
 		transport.WithLogger(logger),
-		// 业务 pb 就绪后放开以下三行，双协议形态即成型。
-		// 在此之前 configs/__svc__.yaml 的 http_addr 必须保持注释：配了 HTTP 端口
-		// 却没有 WithGateway，装配期即报错——端口上不会有任何路由。
 		//   transport.WithService(func(s *grpc.Server) {
 		//       pb.RegisterXxxServer(s, handler.NewGRPC(svc))
 		//   }),

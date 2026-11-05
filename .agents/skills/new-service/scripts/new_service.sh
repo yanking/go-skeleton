@@ -95,11 +95,12 @@ esac
 
 # 传输段按变体追加,一份 yaml 只出现一处 transport(模板里不带这段,免得与实段并存):
 # none 只留说明性注释,rpc/both 写实段。grpc_addr 是业务协议出口,http_addr 是 gateway 转译出口;
-# both 的 http_addr 先注释——模板里 WithGateway 尚未放开,配了端口会在装配期报错。
+# both 先以纯 gRPC 起步、http_addr 注释——业务 pb 就绪后 initial 里的构造器换成
+# NewRPCRESTServer,本端口与 WithGateway/WithMount 一起放开(NewRPCRESTServer 必配 http_addr)。
 case "$variant" in
-	none) printf '\n# transport: # 本服务无对外出口;要出口就放开本段(整段缺失即无传输组件)\n#   grpc_addr: ":9090" # 业务协议出口,rpc/both 必填\n#   http_addr: ":8080" # gateway 转译出口,both 变体与代码里的 WithGateway 一并放开\n' >> "configs/${svc}.yaml" ;;
+	none) printf '\n# transport: # 本服务无对外出口;要出口就放开本段(整段缺失即无传输组件)\n#   grpc_addr: ":9090" # 业务协议出口,rpc/both 必填\n#   http_addr: ":8080" # gateway 转译出口,both 变体与 NewRPCRESTServer 一并放开\n' >> "configs/${svc}.yaml" ;;
 	rpc)  printf '\ntransport:\n  grpc_addr: ":9090" # 业务协议出口\n' >> "configs/${svc}.yaml" ;;
-	both) printf '\ntransport:\n  grpc_addr: ":9090" # 业务协议出口\n  # http_addr: ":8080" # gateway 转译出口;与 initial 里的 WithGateway 一起放开\n' >> "configs/${svc}.yaml" ;;
+	both) printf '\ntransport:\n  grpc_addr: ":9090" # 业务协议出口\n  # http_addr: ":8080" # gateway 转译出口;initial 构造器换成 NewRPCRESTServer 时与 WithGateway 一起放开\n' >> "configs/${svc}.yaml" ;;
 esac
 
 layers="service/repo/model/job"

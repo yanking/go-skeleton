@@ -292,8 +292,11 @@ func TestStopNotifiesInflightHandlers(t *testing.T) {
 	served := start(t, srv)
 
 	go func() {
-		_, _ = (&http.Client{Timeout: 10 * time.Second}).
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).
 			Get("http://" + srv.httpLn.Addr().String() + "/v1/hold")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
 	}()
 	<-inflight // 请求已进 handler
 

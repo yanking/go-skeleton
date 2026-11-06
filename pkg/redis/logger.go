@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -21,6 +22,20 @@ var plumbingCmds = map[string]bool{
 }
 
 func isPlumbing(name string) bool { return plumbingCmds[strings.ToLower(name)] }
+
+// internalLogger 把 go-redis 自己的进程级日志（建连失败、连接池耗尽、集群拓扑
+// 变更）桥到 slog。不接管的话它们以非结构化文本直落 stderr，JSON 采集链路会当
+// 噪音丢掉——而 Redis 抖动、failover、密码轮换时正是这类日志最要紧的时候。
+//
+// 按其 Printf 式签名格式化，这是 go-style 硬规则 5 允许的适配例外。级别取 Warn：
+// go-redis 只在「出了状况但自己还能继续」时打这类日志，恰是 Warn 的语义。
+type internalLogger struct {
+	logger *slog.Logger
+}
+
+func (l internalLogger) Printf(ctx context.Context, format string, v ...any) {
+	l.logger.WarnContext(ctx, fmt.Sprintf(format, v...))
+}
 
 // cmdLogger 经 go-redis Hook 上报命令日志。只记命令名不记参数：
 // 参数可能含敏感值，定位靠 trace_id 关联即可。

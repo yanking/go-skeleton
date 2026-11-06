@@ -57,6 +57,10 @@ type Config struct {
 	// 它是全部组件的总额，但按「剩余预算 / 剩余组件数」逐个分配，而不是先到先吃：
 	// 排在后面的组件不会因为前面某个卡住而一点时间都拿不到（理由见 budgetFor）。
 	//
+	// 一处不精确要说明：每个组件至少拿 minStopBudget，所以总额在极端情况下会被
+	// 撑破——最坏超出是「组件数 × minStopBudget」（当前是每个 100ms，五个组件即
+	// 半秒）。部署侧的宽限期本来就该留余量，这点超出在余量之内。
+	//
 	// 该值须 ≤ 部署侧给进程的宽限期减去传输组件的摘流等待，否则超出的部分只是
 	// 纸面预算——SIGKILL 不会因为配置写得大就晚来。
 	StopTimeout time.Duration `yaml:"stop_timeout"`
@@ -170,7 +174,7 @@ func (a *App) stop(ctx context.Context) error {
 	for i := len(a.components) - 1; i >= 0; i-- {
 		// i+1 是含当前这个在内的剩余组件数。
 		budget := a.budgetFor(ctx, i+1)
-		if err := a.stopOne(a.components[i], budget); err != nil {
+		if err := a.stopOne(ctx, a.components[i], budget); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -185,8 +189,10 @@ func (a *App) stop(ctx context.Context) error {
 //
 // 组件拿到的 ctx 以 budget 为期限、且不携带停机 ctx 的取消信号：总预算耗尽后仍要
 // 给每个剩余组件一点时间收尾（见 budgetFor），直接沿用已过期的 ctx 等于不给。
-func (a *App) stopOne(c Component, budget time.Duration) error {
-	stopCtx, cancel := context.WithTimeout(context.Background(), budget)
+// 用 WithoutCancel 而非另起 Background：ctx 里的值（trace 上下文一类）要留给
+// 组件的收尾动作，剥掉的只是取消信号与期限。
+func (a *App) stopOne(ctx context.Context, c Component, budget time.Duration) error {
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 
 	done := make(chan error, 1)

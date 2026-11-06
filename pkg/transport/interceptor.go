@@ -3,7 +3,9 @@ package transport
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -200,4 +202,64 @@ func peerAddr(ctx context.Context) string {
 		return p.Addr.String()
 	}
 	return "unknown"
+}
+
+// unaryTimeout 给 unary 请求的 ctx 设处理超时。
+//
+// 只设 deadline、不强行结束 handler：强行返回会漏下仍在跑的 goroutine，还可能
+// 撞上已经写出的部分响应。守着 ctx 的下游（pkg/mysql、pkg/pgsql、pkg/redis、
+// pkg/httpc 都守）会据此断掉自己的调用，handler 随之返回——所以「ctx 一路传下去」
+// 这条纪律是本上限真正生效的前提。
+//
+// 客户端自带的 deadline 更早时以它为准：WithTimeout 只会收紧，不会放宽。
+func unaryTimeout(timeout time.Duration) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return handler(ctx, req)
+	}
+}
+
+// unaryRecovery gRPC Unary 的 panic 兜底：转成通用内部错误，堆栈记进结构化日志。
+//
+// 没有它的话，一次 handler 里的 nil map 写入或切片越界就会打死整个进程——两个
+// 端口上全部在途请求一起断，没有任何组件的 Stop 得以执行，一个由特定入参触发的
+// panic 等于一个远程 kill 开关。宪法第 1 条禁止业务路径 panic，但那是对作者的
+// 要求、不是运行期的防线，而出口层是唯一能兜住它的地方。
+func unaryRecovery(logger *slog.Logger) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logPanic(ctx, logger, info.FullMethod, rec)
+				resp, err = nil, errcode.ErrInternal
+			}
+		}()
+		return handler(ctx, req)
+	}
+}
+
+// streamRecovery 同 unaryRecovery 的 Stream 形态。
+func streamRecovery(logger *slog.Logger) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logPanic(ss.Context(), logger, info.FullMethod, rec)
+				err = errcode.ErrInternal
+			}
+		}()
+		return handler(srv, ss)
+	}
+}
+
+// logPanic 记一条 panic：堆栈是排障唯一的线索，必须进结构化日志而不是 stderr 的
+// 纯文本（后者既没有 trace_id 也常被 JSON 采集链路丢掉）。logger 为 nil 时退回
+// slog.Default()——没注入日志不是丢掉堆栈的理由。
+func logPanic(ctx context.Context, logger *slog.Logger, method string, recovered any) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.ErrorContext(ctx, "handler panic",
+		"method", method,
+		"panic", fmt.Sprint(recovered),
+		"stack", string(debug.Stack()))
 }

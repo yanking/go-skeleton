@@ -9,6 +9,7 @@ package transport
 // 「探针豁免、未注册方法不经拦截器」的语义对齐。
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/yanking/go-skeleton/pkg/errcode"
 )
 
 // directAccessLog 直连形态的访问日志 middleware，字段与 gRPC 侧 logAccess 同构
@@ -116,3 +119,74 @@ func (w *accessWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // 上游经 HTTP 打来的调用得以续链（环回形态的 HTTP 端口没有这一层提取）。
 // 仓库不设 otel 全局，传播器同 httpc 一样显式给出、只认 TraceContext。
 var directPropagators = propagation.TraceContext{}
+
+// directTimeout 直连形态的处理超时 middleware，语义同 gRPC 侧的 unaryTimeout。
+func directTimeout(timeout time.Duration) runtime.Middleware {
+	return func(next runtime.HandlerFunc) runtime.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request, pathParams map[string]string) {
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+			next(w, r.WithContext(ctx), pathParams)
+		}
+	}
+}
+
+// directRecovery 直连形态的 panic 兜底，位置与理由同 gRPC 侧的 unaryRecovery。
+//
+// net/http 自己会在连接层 recover，所以进程不会死，但代价是故障变得看不见：
+// 客户端拿到裸 EOF 而不是 500（于是触发重试风暴），slog 里一条记录都没有，
+// 堆栈走标准 log 的 stderr 纯文本。这里把三件事都补上。
+//
+// 已经写出响应头之后才 panic 的，不能再渲染错误体——那会把两段 JSON 拼在一起，
+// 客户端解析不出来，而访问日志还会把它记成当初那个成功状态码。此时唯一诚实的
+// 信号是断掉连接：panic(http.ErrAbortHandler) 正是 net/http 为此准备的哨兵
+// （它不再打印堆栈，连接直接断，客户端至少知道出事了）。
+func directRecovery(logger *slog.Logger) runtime.Middleware {
+	return func(next runtime.HandlerFunc) runtime.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request, pathParams map[string]string) {
+			rw := &recoveryWriter{ResponseWriter: w}
+			defer func() {
+				rec := recover()
+				if rec == nil {
+					return
+				}
+				logPanic(r.Context(), logger, r.Method+" "+r.URL.Path, rec)
+				if rw.wroteHeader {
+					panic(http.ErrAbortHandler)
+				}
+				renderError(rw, errcode.ErrInternal)
+			}()
+			next(rw, r, pathParams)
+		}
+	}
+}
+
+// recoveryWriter 记下响应头是否已写出，供 directRecovery 判断还能不能渲染错误体。
+type recoveryWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *recoveryWriter) WriteHeader(status int) {
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *recoveryWriter) Write(b []byte) (int, error) {
+	// 没显式 WriteHeader 就 Write 时，net/http 会隐式补一个 200——同样算已写出。
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(b)
+}
+
+// recordAccess 把 renderError 的记录请求透传给外层的 accessWriter（若有）。
+// 不透传的话本层的包装会挡住那条断言，访问日志就记不到出口翻译后的码。
+func (w *recoveryWriter) recordAccess(code codes.Code, err error) {
+	if acc, ok := w.ResponseWriter.(interface {
+		recordAccess(codes.Code, error)
+	}); ok {
+		acc.recordAccess(code, err)
+	}
+}
+
+// Unwrap 让 http.NewResponseController 与外层包装能穿透到原 Writer。
+func (w *recoveryWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

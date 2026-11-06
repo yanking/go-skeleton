@@ -70,20 +70,58 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
-// HTTP 出口的两个恒定安全默认，不设配置面。
+// 传输层的恒定安全默认，不设配置面。
 //
-// 刻意不设 ReadTimeout / WriteTimeout：它们是覆盖整个请求/响应周期的硬上限，
-// 而 gateway 会把 proto 里的服务端流式方法转译成长连接响应——加了就是按秒切流。
-// 需要限制单次业务耗时的，用 ctx 超时或部署侧的网关。
+// 环回形态刻意不设 ReadTimeout / WriteTimeout：它们是覆盖整个请求/响应周期的硬
+// 上限，而 gateway 会把 proto 里的服务端流式方法转译成长连接响应——加了就是按秒
+// 切流。直连形态不支持流式方法（见 WithDirectGateway），那条理由在它身上不成立，
+// 故单列一组它自己的上限：慢速 body（header 发完后每几十秒滴一个字节）否则能
+// 无限期占住连接与 goroutine。
 const (
 	// defaultReadHeaderTimeout 请求头读取上限，挡住只发头不发完的慢连接。
 	defaultReadHeaderTimeout = 10 * time.Second
 	// defaultIdleTimeout keep-alive 连接的空闲上限，到点回收，避免闲置连接堆积
-	// 占住文件描述符。不设则退化为 ReadTimeout，而后者按上面的理由是 0（无上限）。
+	// 占住文件描述符。不设则退化为 ReadTimeout，而后者在环回形态按上面的理由是 0。
 	defaultIdleTimeout = 120 * time.Second
+	// defaultDirectReadTimeout 直连形态读完整个请求的上限（含 body）。
+	defaultDirectReadTimeout = 60 * time.Second
+	// defaultDirectWriteTimeout 直连形态写完整个响应的上限。
+	defaultDirectWriteTimeout = 60 * time.Second
+)
+
+// gRPC 服务器的恒定安全默认。grpc-go 这几项的默认值分别是「不限」「永不」，
+// 对长连接协议比 HTTP 侧更要紧：一条连接就能开满流、闲置连接永不回收。
+const (
+	// defaultMaxConcurrentStreams 单条连接上的并发流上限。grpc-go 默认
+	// math.MaxUint32 即不限，单个客户端一条连接开数万流就是数万 goroutine
+	// 加解码缓冲；且不设时服务端连 SETTINGS_MAX_CONCURRENT_STREAMS 都不发，
+	// 客户端侧也无从自律。
+	defaultMaxConcurrentStreams = 256
+	// defaultMaxConnectionIdle 闲置连接回收时长，与 HTTP 侧的 IdleTimeout 同值、
+	// 同理由（fd 不被闲置连接占住）。gRPC 是长连接协议，这条比 HTTP 侧更有必要。
+	defaultMaxConnectionIdle = 120 * time.Second
+	// defaultMaxConnectionAge 连接最长存活时长，到点让客户端重连。
+	// 不设的话 L4 负载均衡与 headless Service 下客户端会长期钉在老 pod 上：
+	// 扩容后新 pod 拿不到流量，缩容与发布时流量又挤在少数连接上抖动。
+	defaultMaxConnectionAge = 30 * time.Minute
+	// defaultMaxConnectionAgeGrace 到龄连接的收尾宽限，让在途 RPC 做完再断。
+	defaultMaxConnectionAgeGrace = 10 * time.Second
+)
+
+// 请求体与处理耗时的默认上限，可经 Config 覆盖。
+const (
+	// defaultMaxRequestBytes 单个 HTTP 请求体的大小上限，取与 grpc-go 默认的
+	// 收包上限（4MiB）同值，两个端口因此同一尺度。不设的话几个并发的大报文
+	// 就能把进程打到 OOM——gRPC 端口有 grpc-go 的默认值兜底，HTTP 端口没有。
+	defaultMaxRequestBytes int64 = 4 << 20
+	// defaultHandlerTimeout 单次 unary 请求的处理超时。客户端不传 deadline 时，
+	// 没有它 handler 可以一直跑下去：下游卡住时请求无限堆积，没有自然泄压点。
+	// 只作用于 unary——流式方法天然长连接，给它设硬上限就是按秒切流。
+	defaultHandlerTimeout = 30 * time.Second
 )
 
 // Config 传输装配参数，三种构造器共用，字段按形态必填或必空（见各构造器）。
@@ -94,6 +132,42 @@ type Config struct {
 	// HTTPAddr gateway 出口的监听地址（如 ":8080"）。NewRPCRESTServer（环回转译）与
 	// NewRESTServer（直连）必填；NewRPCServer 必须为空——该形态不开 HTTP。
 	HTTPAddr string `yaml:"http_addr"`
+	// MaxRequestBytes 单个 HTTP 请求体的大小上限，零值取 defaultMaxRequestBytes，
+	// 负值即不限制（先读那个常量的注释再决定）。gRPC 端口的对等旋钮是 grpc-go 的
+	// MaxRecvMsgSize，本包按同值设置，要改用 WithGRPCServerOption。
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
+	// HandlerTimeout 单次 unary 请求的处理超时，零值取 defaultHandlerTimeout，
+	// 负值即不限制。它给请求 ctx 设 deadline——不强行结束 handler（那会漏下
+	// goroutine、还可能撞上已写出的部分响应），而是让守着 ctx 的下游调用
+	// （pkg/mysql、pkg/pgsql、pkg/redis、pkg/httpc 都守）自己断掉。
+	// 业务代码因此必须把 ctx 一路传下去，这是本仓既有的纪律。
+	//
+	// 流式方法不受此限：长连接是它的常态。
+	HandlerTimeout time.Duration `yaml:"handler_timeout"`
+}
+
+// maxRequestBytes 取生效的请求体上限，0 即不限制。
+func (c Config) maxRequestBytes() int64 {
+	switch {
+	case c.MaxRequestBytes == 0:
+		return defaultMaxRequestBytes
+	case c.MaxRequestBytes < 0:
+		return 0
+	default:
+		return c.MaxRequestBytes
+	}
+}
+
+// handlerTimeout 取生效的处理超时，0 即不限制。
+func (c Config) handlerTimeout() time.Duration {
+	switch {
+	case c.HandlerTimeout == 0:
+		return defaultHandlerTimeout
+	case c.HandlerTimeout < 0:
+		return 0
+	default:
+		return c.HandlerTimeout
+	}
 }
 
 // Server 服务的对外传输出口，实现 app.Component。grpc 与 http 哪些生效由所选
@@ -108,6 +182,9 @@ type Server struct {
 	httpLn net.Listener
 	// conn 是环回连接，仅 NewRPCRESTServer 形态非 nil；直连形态无环回。
 	conn *grpc.ClientConn
+	// drain 取消 HTTP 连接的 base ctx，由 Stop 在宽限期耗尽后调用，
+	// 让在途 handler 知道该收尾了（见 baseContext）。纯 gRPC 形态为 nil。
+	drain context.CancelFunc
 }
 
 // NewRPCServer 构造纯 gRPC 形态：只监听 grpc_addr，不开 HTTP。此刻即「起不来就该死」
@@ -122,7 +199,7 @@ func NewRPCServer(cfg Config, opts ...Option) *Server {
 		panic(fmt.Errorf("装配 transport: 监听 gRPC %s: %w", cfg.GRPCAddr, err))
 	}
 
-	s := &Server{grpc: newGRPCServer(o), grpcLn: grpcLn}
+	s := &Server{grpc: newGRPCServer(cfg, o), grpcLn: grpcLn}
 	for _, register := range o.services {
 		register(s.grpc)
 	}
@@ -141,11 +218,11 @@ func NewRPCRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 		panic(fmt.Errorf("装配 transport: 监听 gRPC %s: %w", cfg.GRPCAddr, err))
 	}
 
-	s := &Server{grpc: newGRPCServer(o), grpcLn: grpcLn}
+	s := &Server{grpc: newGRPCServer(cfg, o), grpcLn: grpcLn}
 	for _, register := range o.services {
 		register(s.grpc)
 	}
-	s.attachHTTP(ctx, cfg.HTTPAddr, o)
+	s.attachHTTP(ctx, cfg, o)
 	return s
 }
 
@@ -159,7 +236,7 @@ func NewRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 	validateREST(cfg, o)
 
 	s := &Server{}
-	s.attachDirectHTTP(ctx, cfg.HTTPAddr, o)
+	s.attachDirectHTTP(ctx, cfg, o)
 	return s
 }
 
@@ -229,23 +306,43 @@ func validateMounts(mounts []mount) {
 	}
 }
 
-// newGRPCServer 按选项装好拦截链与内置服务。
-func newGRPCServer(o *options) *grpc.Server {
+// newGRPCServer 按选项装好拦截链、资源上限与内置服务。
+func newGRPCServer(cfg Config, o *options) *grpc.Server {
 	// 出口层错误翻译是仓库级约定，作为链首固定挂上；Chain*Interceptor 多次调用是
 	// 追加语义，后面的注入项与自定义拦截器都不会顶掉它。
 	opts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(errCodeToStatus),
 		grpc.ChainStreamInterceptor(errCodeToStatusStream),
 	}
+	// 资源上限：grpc-go 的默认值是「单连接流数不限、连接永不回收」，理由见各常量。
+	opts = append(opts,
+		grpc.MaxRecvMsgSize(int(cfg.maxRequestBytes())),
+		grpc.MaxConcurrentStreams(defaultMaxConcurrentStreams),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     defaultMaxConnectionIdle,
+			MaxConnectionAge:      defaultMaxConnectionAge,
+			MaxConnectionAgeGrace: defaultMaxConnectionAgeGrace,
+		}))
 	if o.tracerProvider != nil {
 		opts = append(opts, grpc.StatsHandler(
 			otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(o.tracerProvider))))
+	}
+	if timeout := cfg.handlerTimeout(); timeout > 0 {
+		// 超时在访问日志之外：日志因此记得到「这次请求是超时失败的」。
+		opts = append(opts, grpc.ChainUnaryInterceptor(unaryTimeout(timeout)))
 	}
 	if o.logger != nil {
 		opts = append(opts,
 			grpc.ChainUnaryInterceptor(unaryAccessLog(o.logger)),
 			grpc.ChainStreamInterceptor(streamAccessLog(o.logger)))
 	}
+	// recovery 在访问日志之内、鉴权之外：panic 先被转成 error，访问日志才记得到
+	// 这次请求（放在日志之外的话 panic 会跳过日志的记录点），而鉴权策略自己 panic
+	// 也一并兜住。宪法第 1 条禁止业务路径 panic，但那是对作者的要求，不是运行期的
+	// 防线——出口层是唯一能兜住它的地方。
+	opts = append(opts,
+		grpc.ChainUnaryInterceptor(unaryRecovery(o.logger)),
+		grpc.ChainStreamInterceptor(streamRecovery(o.logger)))
 	if o.authenticator != nil {
 		opts = append(opts,
 			grpc.ChainUnaryInterceptor(unaryAuth(o.authenticator)),
@@ -266,7 +363,8 @@ func newGRPCServer(o *options) *grpc.Server {
 }
 
 // attachHTTP 装上环回转译出口：独立监听、环回连接、路由树。
-func (s *Server) attachHTTP(ctx context.Context, addr string, o *options) {
+func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
+	addr := cfg.HTTPAddr
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		panic(fmt.Errorf("装配 transport: 监听 HTTP %s: %w", addr, err))
@@ -292,16 +390,18 @@ func (s *Server) attachHTTP(ctx context.Context, addr string, o *options) {
 	}
 
 	s.http = &http.Server{
-		Handler:           mountMux(gwMux, o.mounts),
+		Handler:           limitBody(mountMux(gwMux, o.mounts), cfg.maxRequestBytes()),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
 		IdleTimeout:       defaultIdleTimeout,
+		BaseContext:       s.baseContext(),
 	}
 }
 
 // attachDirectHTTP 装上直连 REST 出口：gateway 路由直接注册 handler 实现，无 gRPC
 // 服务器、无环回；鉴权与访问日志经 middleware 挂在每条路由上（链序见包注释），
 // 错误出口由 mux 的错误处理器承担。
-func (s *Server) attachDirectHTTP(ctx context.Context, addr string, o *options) {
+func (s *Server) attachDirectHTTP(ctx context.Context, cfg Config, o *options) {
+	addr := cfg.HTTPAddr
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		panic(fmt.Errorf("装配 transport: 监听 HTTP %s: %w", addr, err))
@@ -311,9 +411,16 @@ func (s *Server) attachDirectHTTP(ctx context.Context, addr string, o *options) 
 	// 链序与 gRPC 侧一致：访问日志在外、鉴权在内（先注册者在外层，
 	// runtime.chainMiddlewares 的组装语义）；出口翻译是错误处理器，天然在最外。
 	var middlewares []runtime.Middleware
+	if timeout := cfg.handlerTimeout(); timeout > 0 {
+		middlewares = append(middlewares, directTimeout(timeout))
+	}
 	if o.logger != nil {
 		middlewares = append(middlewares, directAccessLog(o.logger))
 	}
+	// recovery 在访问日志之内、鉴权之外，与 gRPC 侧同位置同理由。没有它时
+	// net/http 会在连接层 recover：客户端拿到的是裸 EOF（而非 500），访问日志
+	// 一条都没有，堆栈还走标准 log 的 stderr 纯文本——故障被吞成「看不见」。
+	middlewares = append(middlewares, directRecovery(o.logger))
 	if o.authenticator != nil {
 		middlewares = append(middlewares, directAuth(o.authenticator))
 	}
@@ -340,10 +447,41 @@ func (s *Server) attachDirectHTTP(ctx context.Context, addr string, o *options) 
 			}))
 	}
 	s.http = &http.Server{
-		Handler:           handler,
+		Handler:           limitBody(handler, cfg.maxRequestBytes()),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		IdleTimeout:       defaultIdleTimeout,
+		// 直连形态不支持流式方法，这两个硬上限因此安全（环回形态不能设，见常量注释）。
+		ReadTimeout:  defaultDirectReadTimeout,
+		WriteTimeout: defaultDirectWriteTimeout,
+		IdleTimeout:  defaultIdleTimeout,
+		BaseContext:  s.baseContext(),
 	}
+}
+
+// limitBody 给请求体套大小上限。limit ≤0 即不限制，原样返回。
+// 超限时 MaxBytesReader 让后续读取报错，由 gateway 的错误处理器翻成统一错误体。
+func limitBody(next http.Handler, limit int64) http.Handler {
+	if limit <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// baseContext 给 http.Server 装一个可取消的连接级 ctx，并把 cancel 留在 Server 上。
+//
+// 请求 ctx 派生自它，于是停机宽限期耗尽后 Stop 取消它，在途 handler 就能观察到
+// 「该收尾了」。没有这条通路时，Shutdown 超时返回后 handler 仍在跑、还能写出
+// 200，直到进程退出时在任意一行被硬切——「已扣款未记账」正是这么来的。
+//
+// 注意宽限期内不取消：那会把优雅排空变成当场掐断。
+func (s *Server) baseContext() func(net.Listener) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.drain = cancel
+	return func(net.Listener) context.Context { return ctx }
 }
 
 // mountMux 组外层路由树：/healthz 探针（HTTP 形态下探针走这里——没有 gRPC health
@@ -397,6 +535,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.http != nil {
 		if err := s.http.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("停止 HTTP: %w", err))
+			// 宽限期已耗尽而 handler 还在跑：Shutdown 不会掐断它们，
+			// 取消 base ctx 让它们自己收尾（见 baseContext）。
+			if s.drain != nil {
+				s.drain()
+			}
 		}
 		if s.conn != nil {
 			if err := s.conn.Close(); err != nil {

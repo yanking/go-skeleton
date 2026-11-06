@@ -122,7 +122,11 @@ func scanFile(t *testing.T, path string) error {
 	return scanner.Err()
 }
 
-// scanSQL 种子数据的判据：文件里出现凭证类列名就要求显式豁免。
+// writeStmt 匹配会把数据写进库的语句。凭证要入库总得有一条这样的语句，
+// 纯 DDL 文件（只有 CREATE TABLE 的列定义）因此不在查的范围内。
+var writeStmt = regexp.MustCompile(`(?i)(^|[^a-z])(insert|update|upsert|merge|copy)([^a-z]|$)`)
+
+// scanSQL 种子数据的判据：文件里既有写语句、又出现凭证类列名，就要求显式豁免。
 //
 // 为什么不逐值判断：SQL 的 INSERT 把列名与值分在两处写
 // （INSERT INTO t (id, client_secret) VALUES (1, 'abc')），逐行的 k=v 规则认不出
@@ -132,12 +136,16 @@ func scanFile(t *testing.T, path string) error {
 //
 // 代价是全是假值的演示数据也要写一行豁免。这是刻意的：上一次泄露的掩护正是
 // 「文件注释自称仅供演示」，而那些值取自真实配置。写豁免要给理由，评审看得到。
+//
+// 纯 DDL 文件放过（见 writeStmt）：`client_secret VARCHAR(64) NOT NULL` 这样的
+// 列定义里一个值都没有，要求它写豁免只是噪音——而噪音会让人去关掉检查。
 func scanSQL(t *testing.T, f *os.File, rel string) error {
 	t.Helper()
 	var (
-		hits    []string
-		exempt  bool
-		scanner = bufio.NewScanner(f)
+		hits     []string
+		exempt   bool
+		hasWrite bool
+		scanner  = bufio.NewScanner(f)
 	)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for line := 1; scanner.Scan(); line++ {
@@ -150,6 +158,9 @@ func scanSQL(t *testing.T, f *os.File, rel string) error {
 		if strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
+		if writeStmt.MatchString(text) {
+			hasWrite = true
+		}
 		if m := credentialKey.FindString(text); m != "" {
 			hits = append(hits, fmt.Sprintf("%s:%d %q", rel, line, m))
 		}
@@ -157,7 +168,7 @@ func scanSQL(t *testing.T, f *os.File, rel string) error {
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	if len(hits) > 0 && !exempt {
+	if len(hits) > 0 && hasWrite && !exempt {
 		t.Errorf("%s 出现凭证类列名（%s），种子数据里的凭证须显式表态："+
 			"在文件里写一行注释带 %s<理由>，说明这些值为何不是真凭证"+
 			"（宪法第 4 条；本仓历史上真实渠道凭证正是从种子数据混进来的）",
@@ -295,6 +306,18 @@ func TestScanSQLRequiresExemption(t *testing.T) {
 		}
 		if fake.Failed() {
 			t.Error("带了豁免标记不应报违规")
+		}
+	})
+
+	t.Run("纯 DDL 不要求豁免", func(t *testing.T) {
+		// 列定义里一个值都没有，要求写豁免只是噪音。
+		ddl := "CREATE TABLE channels (\n  id BIGSERIAL PRIMARY KEY,\n  client_secret VARCHAR(64) NOT NULL\n);\n"
+		fake := &testing.T{}
+		if err := scanSQL(fake, writeTemp(t, ddl), "create.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if fake.Failed() {
+			t.Error("纯 DDL 文件不该被要求豁免")
 		}
 	})
 

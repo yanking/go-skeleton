@@ -20,7 +20,7 @@ import (
 func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 	// Logger 是装配期注入项，配置文件不出现，在此填入。
 	c.App.Logger = logger
-	infra, tel := createInfra(ctx, c)
+	infra, tel := createInfra(ctx, c, logger)
 	components := append(infra, createServer(ctx, c, logger, tel)...)
 	return app.New(c.App, components...).Run(ctx)
 }
@@ -28,9 +28,11 @@ func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 // createInfra 构造基础组件：被业务依赖的资源（遥测、DB、Redis）。
 // 句柄（如 *gorm.DB）解嵌后传给业务构造侧使用，组件本身留在这里注册，
 // 保证仓储层拿不到关停资源的能力。
-func createInfra(ctx context.Context, c config.Config) (components []app.Component, tel *telemetry.Telemetry) {
+func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (components []app.Component, tel *telemetry.Telemetry) {
 	// 遥测 Service 与日志同源（配置文件 log.name），避免两处各写一份服务名。
 	c.Telemetry.Service = c.Log.Service
+	// 遥测自身的日志（装配结果、SDK 导出失败）也走统一出口。
+	c.Telemetry.Logger = logger
 	tel = telemetry.New(ctx, c.Telemetry)
 	components = append(components, tel)
 
@@ -44,14 +46,24 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 		return components
 	}
 
-	// 注入即自动挂拦截链（出口翻译 → 访问日志 → 鉴权），顺序由 transport 固定；
+	// 注入即自动挂拦截链（出口翻译 → 处理超时 → 访问日志 → panic 兜底 → 鉴权），
+	// 顺序由 transport 固定；
 	// 需要鉴权时加 transport.WithAuthenticator(...)，内置策略见 transport.FixedBearerAuth。
 	srv := transport.NewRPCServer(c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
+		// 指标 Provider 要显式给：漏了不报错，只是请求量、错误率、延迟分位
+		// （RED 三件套）静默消失，而「接口变慢、错误率涨」只能靠它们定位。
+		transport.WithMeterProvider(tel.MeterProvider()),
 		transport.WithLogger(logger),
 		// 业务 pb 就绪后放开注册，错误出口已由 transport 统一翻译，handler 只管返回 errcode：
 		//   transport.WithService(func(s *grpc.Server) {
 		//       pb.RegisterXxxServer(s, handler.NewGRPC(svc))
+		//   }),
+		// 有数据库或 Redis 依赖时加就绪检查——装配期不 ping 库（DB 比进程晚就绪是
+		// 常态）这个取舍的另一半就在这里：不加的话，连不上库的实例照样通过就绪
+		// 探针，编排系统继续给它发流量，每个请求都 500。
+		//   transport.WithReadinessCheck(func(ctx context.Context) error {
+		//       return db.WithContext(ctx).Exec("SELECT 1").Error
 		//   }),
 	)
 

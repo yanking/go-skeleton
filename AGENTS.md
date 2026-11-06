@@ -33,6 +33,7 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `README.md` | 人类入口:快速开始与仓库导览 |
 | `CONSTITUTION.md` / 本文件 / `.agents/` | 约束与导航;编码细则在 `.agents/go-style.md`,可执行技能在 `.agents/skills/` |
 | `docs/<svc>/` | 服务的业务文档:架构、时序、接入指南;`diagrams/` 是 archify 渲染页 |
+| `docs/deploy.md` | 部署参考:探针语义、宽限期预算、退出码、资源限制、凭证注入 |
 | `docs/toolbox.md` | 仓库级工具参考(make 目标之外的工具,如 archify 画图) |
 | `docs/superpowers/{specs,plans}/` | 按日期归档的技术方案与实施计划 |
 
@@ -44,21 +45,39 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `pkg/conf` | YAML 配置加载与绑定校验;`${NAME}` 引用在解析前从环境变量展开,未设置或写法不合文法即 panic |
 | `pkg/log` | 构造统一 slog.Logger,支持从 ctx 提取 trace_id 等字段 |
 | `pkg/errcode` | 业务错误码与错误的「双通道」封装 |
-| `pkg/telemetry` | OTel 链路追踪与指标一键装配,stdout/otlp 双导出,含运行时指标 |
+| `pkg/telemetry` | OTel 链路追踪与指标一键装配,stdout/otlp 双导出,含运行时指标;采样策略可配(生产须显式配比例采样),SDK 内部错误桥到 slog |
 | `pkg/mysql` | GORM MySQL 连接池,dbresolver 自动读写分离,内嵌 `*gorm.DB` 直接调用 |
 | `pkg/pgsql` | GORM PostgreSQL(pgx stdlib)连接池,与 `pkg/mysql` 同构 |
 | `pkg/redis` | go-redis 客户端,单机/集群经 addrs 数量自动推断,内嵌 `UniversalClient` 直接调用 |
 | `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,连接池逐 Client 独立;注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 只留 scheme://host/path,报文不记) |
-| `pkg/transport` | 对外传输组件,三种形态构造器:`NewRPCServer` 纯 gRPC / `NewRPCRESTServer` gRPC + gateway 环回双端口 / `NewRESTServer` 直连 REST(pb 契约直出 HTTP,无环回,不支持流式方法)。拦截链含 errcode 出口翻译、访问日志与鉴权(otel 经 StatsHandler/otelhttp 挂载),链序见包注释 |
+| `pkg/transport` | 对外传输组件,三种形态构造器:`NewRPCServer` 纯 gRPC / `NewRPCRESTServer` gRPC + gateway 环回双端口 / `NewRESTServer` 直连 REST(pb 契约直出 HTTP,无环回,不支持流式方法)。拦截链含 errcode 出口翻译、处理超时、访问日志、panic 兜底与鉴权(otel 经 StatsHandler/otelhttp 挂载),链序见包注释;带请求体与连接数上限、摘流窗口与 liveness/readiness 两个探针 |
 | `pkg/queue` | asynq 任务队列薄封装:Client 入队 + Worker 消费(实现 app.Component) |
 
 本表只是索引;使用约束(锁读纪律、停机顺序、全局状态、装配期行为)以各包 Go doc 注释为准,改用法前先读。
+
+**遥测 Provider 要显式注入**:本仓不设 otel 全局(理由见 `pkg/telemetry` 包注释),
+`pkg/transport`、`pkg/mysql`、`pkg/pgsql`、`pkg/redis`、`pkg/httpc` 都从 Config 或选项
+收 TracerProvider / MeterProvider。**漏注入不报错**——instrumentation 回落到 no-op 全局,
+那部分遥测静默消失,而 RED 指标与连接池饱和度恰恰只能靠它们定位。各包因此在未拿到
+Provider 时记一条「未启用」的装配日志,部署后扫一眼启动日志即可确认。
 
 ## 错误处理约定(改错误相关代码前必读)
 
 不变量见宪法第 1、2 条;双通道封装(业务字段给客户端、原始错误链只进日志)与用法约定见 `pkg/errcode` 包注释。
 
-逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染);漏翻译的原始错误(非 errcode 也非 status)在出口兜成通用内部错误 10003(ctx 超时/取消分别兜成 10005/10006),原文只进日志;status 错误放行(DeadlineExceeded/Canceled 例外,同 ctx 超时/取消兜成 10005/10006),但故障类码(Unknown/Internal/Unavailable/DataLoss)的消息换成通用内部错误消息——这是兜底,不是许可。每层只翻译相邻下层的错误。
+逐层翻译的固定流向:repo 把可识别的底层错误翻译为 service 哨兵 → service 统一翻译为业务 errcode(底层错误用 Wrap 挂住 cause)→ 出口由 pkg/transport 统一打包(gRPC 拦截器把业务码放 status details,HTTP 经 gateway 渲染)。出口层按来源分三路:
+
+| 来源 | 出口行为 |
+|---|---|
+| errcode(含 Wrap 结果) | 翻成 status,业务码进 details 的 ErrorInfo(带本仓归属域) |
+| **本仓造出的** status(details 带本仓归属域) | 原样放行——这是有意给客户端看的消息 |
+| 其余 status(漏翻译、下游带回)与裸错误 | **只保留状态码**,消息换通用内部错误消息、details 丢弃;ctx 超时/取消无论裸错误还是 status 形态都归一到 10005/10006 |
+
+第三路是**白名单**:黑名单要穷举「哪些码不安全」,白名单只需说明「哪些安全」,后者才兜得住没想到的码。保留状态码是因为码携带重试语义,而泄漏发生在消息与 details 里(实测原样放行会带出 dial tcp 的内网地址、连接串凭证、内部报文上限)。丢 details 同样必要:下游的 ErrorInfo 带着它自己分段的业务码,透出去就是冒充本仓的码。
+
+这是兜底,不是许可——每层仍要翻译相邻下层的错误。非业务路径(路径不存在、方法不允许、请求解析失败)由 gateway 的路由错误处理器翻成 10002/10001,HTTP 状态保住 404/405/400。
+
+一处已知盲区:报文超限、编解码失败发生在 pb 生成代码的 dec() 阶段,比拦截链更早,既没有业务码也不进访问日志——那部分可观测性靠边缘网关或 mesh 的指标补。
 
 错误码分段(新服务在此登记;分模块的服务再在本段内按模块划千位子段,写进归属列):
 
@@ -91,11 +110,11 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 - **层内不另建子包**:层优先布局里 `repo/shared/` 与 `repo/order/` 同形、分不开,所以层目录的一级子目录只能是模块。模块内部要再分包,放进模块里(`repo/<module>/<pkg>/`)。
 - 同一个服务要么全平铺、要么全分模块,不混用。
 
-Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这几条由 `test/arch` 的架构测试在 `make check` 里强制。它按目录识别:服务一级子目录里名字是层名的是层目录,`config` 与其余名字是服务级共享包;**模块集合由 `service` 层的子目录定义**——`service` 是模块唯一的对外入口,别的层可以缺某个模块的目录(不是每个模块都有 job),拿它们当来源会把「某模块还没有 repo」误判成布局问题。层目录里直接放 `.go` 即平铺、只放子目录即分模块;两者并存、某层直接放 `.go` 而服务已分模块、或层内出现不在模块集合里的子目录,都报违规。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名(否则渲染出 `handler/handler/`,且 initial 的包别名会成 `handlerhandler`),也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
+Go 的 `internal/` 只挡本仓库之外的引用,仓库内哪个包能引用哪个包编译器不管,所以这几条由 `test/arch` 的架构测试在 `make check` 里强制(同理,宪法第 4 条「凭证只写 `${ENV_NAME}` 引用」由 `test/secrets` 强制——两者都是普通 go test,因此自动落在提交门槛里)。它按目录识别:服务一级子目录里名字是层名的是层目录,`config` 与其余名字是服务级共享包;**模块集合由 `service` 层的子目录定义**——`service` 是模块唯一的对外入口,别的层可以缺某个模块的目录(不是每个模块都有 job),拿它们当来源会把「某模块还没有 repo」误判成布局问题。层目录里直接放 `.go` 即平铺、只放子目录即分模块;两者并存、某层直接放 `.go` 而服务已分模块、或层内出现不在模块集合里的子目录,都报违规。模块名是小写字母开头的字母数字串(`^[a-z][a-z0-9]*$`),不与层名、`config` 重名(否则渲染出 `handler/handler/`,且 initial 的包别名会成 `handlerhandler`),也不用 Go 工具会特殊对待的 `testdata`、`vendor`、`internal`;initial 里多个模块的同层包同名,按 `<模块><层>` 起别名(如 `orderservice`)。
 
 跳层依赖一律经接口:每一层只依赖**使用方自己声明**的窄接口,不依赖下一层的具体类型(go-style 硬规则 6「接口在使用方声明」)。`handler` 在自己包里声明它需要的用例接口、`service` 声明仓储接口、`job` 声明它需要的用例接口,跨模块与共享包→模块同理(见上「模块边界」);具体实现一律由 `cmd/<svc>/initial` 注入,构造器因此「收接口、返具体类型」。好处是每一层都能脱开下层单测;代价是只有一个实现的地方也要写一份接口声明——这是刻意接受的,不以「现在只有一个实现」为由省掉。
 
-传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。分模块的服务在 createServer 里逐个模块构造 repo → service → handler(各层的模块子包),再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;双端口形态的服务 `WithGateway` 同样每个模块追加一次)。
+传输装配在 `cmd/<svc>/initial`,不进 internal:基础组件与业务组件分函数构造(createInfra:遥测/DB/Redis;createServer:传输、job),App 组装时基础在前业务在后——顺序即注册顺序,基础组件先起后停。装配时把 `tel.TracerProvider()` 与 `tel.MeterProvider()` 一并传给各组件(见上「遥测 Provider 要显式注入」),有依赖的服务再给传输组件加 `WithReadinessCheck`——装配期不 ping 库这个取舍的另一半就在这里。分模块的服务在 createServer 里逐个模块构造 repo → service → handler(各层的模块子包),再统一交给 transport(`WithService` 可多次调用,每个模块追加一次;双端口形态的服务 `WithGateway` 同样每个模块追加一次)。
 
 传输形态由构造器决定,配置地址须与形态匹配、错配即装配期报错(`pkg/transport` 包注释有全表):
 
@@ -123,3 +142,4 @@ new-service 技能还没有直连 REST 变体,入口照 rpc 变体的骨架把 `
 4. **建库**:`make migrate-create SVC=<svc> NAME=<desc>` 生成首个迁移,写好 Up/Down 后 `make migrate-up`;后续变更一律新增文件(其余约定见上节)。
 5. **装配**:在 `cmd/<svc>/initial` 接线——createInfra 在前、createServer 在后;both 变体在业务 pb 就绪后把构造器换成 `NewRPCRESTServer`,连同 `WithGateway` 与 `http_addr` 在同一次改动里放开(形态与地址错配即装配期报错,见「服务分层」的形态表)。
 6. **验证与运行**:`make check` 全绿后 `make run SVC=<svc>`,HTTP 出口 `/docs` 看接口文档。端到端脚本按服务放 `test/e2e/<svc>/run.sh`(自带迁移、测试数据写入、被测服务与下游 mock 的起停),用 `make e2e SVC=<svc>` 跑,前置条件以该脚本的头部注释为准。
+7. **上线**:`make docker SVC=<svc>` 出镜像,部署侧的探针、宽限期预算与凭证注入按 `docs/deploy.md`——那几项配错的后果(liveness 指向就绪检查、宽限期装不下停机两段)都是发布时才显形的。

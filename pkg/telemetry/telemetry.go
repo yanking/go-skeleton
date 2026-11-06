@@ -129,6 +129,16 @@ type Config struct {
 	Insecure bool `yaml:"insecure"`
 }
 
+// sampler 取归一后的采样策略。直接在 Go 里构造 Config 时 Sampler 是空串
+// （不经 UnmarshalText），各处各自判断空串迟早漏一处——与 pkg/redis 的
+// Config.mode() 同一形状，零值只在这里归一一次。
+func (c Config) sampler() Sampler {
+	if c.Sampler == "" {
+		return SamplerParentBasedAlwaysOn
+	}
+	return c.Sampler
+}
+
 // Validate 实现 conf 的校验钩子：otlp 未配 endpoint 即报错。New 必调（装配期）；
 // 要提前到绑定阶段，由服务 Config 的 Validate 委托到此（conf 只调顶层）。
 func (c Config) Validate() error {
@@ -137,7 +147,7 @@ func (c Config) Validate() error {
 	}
 	// 比例采样的零值就是「一条不采」，不能当默认值放过：配了采样却毫无数据，
 	// 而且没有任何征兆，比直接起不来难查得多。
-	if c.Sampler == SamplerParentBasedRatio && (c.SampleRatio <= 0 || c.SampleRatio > 1) {
+	if c.sampler() == SamplerParentBasedRatio && (c.SampleRatio <= 0 || c.SampleRatio > 1) {
 		return fmt.Errorf("sampler 为 %s 时 sample_ratio 必须在 (0,1] 内，当前 %v",
 			SamplerParentBasedRatio, c.SampleRatio)
 	}
@@ -197,12 +207,13 @@ func New(ctx context.Context, cfg Config) *Telemetry {
 	}))
 	// 装配结果记一条：导出器与采样策略配错时，启动日志里能直接看出来，
 	// 不必等到「后端怎么没数据」才回头查配置。
+	// service 不重复记：logger 已经带着它（pkg/log 的 New 固定附加），
+	// 再写一次会让这条 JSON 出现两个同名键。
 	logger.Info("遥测已装配",
-		"service", cfg.Service,
 		"exporter", cfg.Exporter,
-		"sampler", cfg.Sampler,
+		"sampler", cfg.sampler(),
 		"sample_ratio", cfg.SampleRatio,
-		"metric_interval", metricInterval(cfg))
+		"metric_interval", metricInterval(cfg).String())
 
 	return &Telemetry{tracer: tracer, meter: meter}
 }

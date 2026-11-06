@@ -74,6 +74,25 @@ mkdir -p "cmd/${svc}/initial" "internal/${svc}/config" "configs" \
 	"$(layer_path model)" "$(layer_path job)"
 render "$assets/main.go.tpl"   "cmd/${svc}/main.go"
 render "$assets/config.go.tpl" "internal/${svc}/config/config.go"
+# transport_section 传输段的公共部分。默认值都是安全的(见 pkg/transport 的常量注释),
+# 故可调项以注释给出——放开哪一项就意味着「我知道我在改什么」。
+transport_section() {
+	cat <<'TRANSPORT'
+
+transport:
+  grpc_addr: ":9090" # 业务协议出口
+  # 摘流等待:先把就绪探针置红、等编排系统摘流,再关监听。零值取 5s,负值即不等。
+  # 它与 app.stop_timeout 串行相加,两段之和要装进部署侧宽限期(见 docs/deploy.md)。
+  # drain_delay: 5s
+  # 单次 unary 请求的处理超时,零值取 30s,负值即不限制;流式方法不受此限。
+  # handler_timeout: 30s
+  # HTTP 请求体上限,零值取 4MiB(与 gRPC 收包上限同值)。
+  # max_request_bytes: 4194304
+  # gRPC reflection:免鉴权且吐出完整契约,默认关。本地联调打开,生产保持关闭。
+  # reflection: false
+TRANSPORT
+}
+
 render "$assets/service.yaml.tpl" "configs/${svc}.yaml"
 # 分层骨架：包注释即契约，各层填什么见渲染出的 doc.go 注释。
 render "$assets/service.doc.go.tpl" "$(layer_path service)/doc.go"
@@ -103,8 +122,10 @@ esac
 # NewRPCRESTServer,本端口与 WithGateway/WithMount 一起放开(NewRPCRESTServer 必配 http_addr)。
 case "$variant" in
 	none) printf '\n# transport: # 本服务无对外出口;要出口就放开本段(整段缺失即无传输组件)\n#   grpc_addr: ":9090" # 业务协议出口,rpc/both 必填\n#   http_addr: ":8080" # gateway 转译出口,both 变体与 NewRPCRESTServer 一并放开\n' >> "configs/${svc}.yaml" ;;
-	rpc)  printf '\ntransport:\n  grpc_addr: ":9090" # 业务协议出口\n' >> "configs/${svc}.yaml" ;;
-	both) printf '\ntransport:\n  grpc_addr: ":9090" # 业务协议出口\n  # http_addr: ":8080" # gateway 转译出口;initial 构造器换成 NewRPCRESTServer 时与 WithGateway 一起放开\n' >> "configs/${svc}.yaml" ;;
+	rpc)  printf '%s' "$(transport_section)" >> "configs/${svc}.yaml" ;;
+	both) printf '%s' "$(transport_section)
+  # http_addr: \":8080\" # gateway 转译出口;initial 构造器换成 NewRPCRESTServer 时与 WithGateway 一起放开
+" >> "configs/${svc}.yaml" ;;
 esac
 
 layers="service/repo/model/job"

@@ -19,16 +19,18 @@ import (
 func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 	// Logger 是装配期注入项，配置文件不出现，在此填入。
 	c.App.Logger = logger
-	components := append(createInfra(ctx, c), createServer(ctx, c)...)
+	components := append(createInfra(ctx, c, logger), createServer(ctx, c)...)
 	return app.New(c.App, components...).Run(ctx)
 }
 
 // createInfra 构造基础组件：被业务依赖的资源（遥测、DB、Redis）。
 // 句柄（如 *gorm.DB）解嵌后传给业务构造侧使用，组件本身留在这里注册，
 // 保证仓储层拿不到关停资源的能力。
-func createInfra(ctx context.Context, c config.Config) (components []app.Component) {
+func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (components []app.Component) {
 	// 遥测 Service 与日志同源（配置文件 log.name），避免两处各写一份服务名。
 	c.Telemetry.Service = c.Log.Service
+	// 遥测自身的日志（装配结果、SDK 导出失败）也走统一出口。
+	c.Telemetry.Logger = logger
 	tel := telemetry.New(ctx, c.Telemetry)
 	components = append(components, tel)
 

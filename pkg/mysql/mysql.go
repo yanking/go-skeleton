@@ -17,7 +17,10 @@
 //
 // DB 内嵌 *gorm.DB（直接链式调用），同时实现 app.Component。连接层走 otelsql
 // 包装的 database/sql 池（SQL span 在这层埋），GORM 经 dialector 的 Conn
-// 乘坐其上，池参数、DSN 校验与追踪一并由本包管。装配期不 ping、不探版本：
+// 乘坐其上，池参数、DSN 校验与追踪一并由本包管：池参数零值一律取本包的保守
+// 缺省（database/sql 的零值在服务端全是危险默认，见常量注释），DSN 则必须带
+// parseTime=true 与 timeout/readTimeout/writeTimeout 三个超时，缺一项 Validate
+// 当场报错——三个超时的零值都是「无限等待」。装配期不 ping、不探版本：
 // DB 比进程晚就绪是常态（部署顺序），建连失败由首个查询暴露；要 readiness
 // 就在上层健康检查里 ping。
 //

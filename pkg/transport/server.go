@@ -60,7 +60,16 @@
 //   - Stop 先把就绪状态置为不可用、等 Config.DrainDelay（默认 5s）再关监听。
 //     没有这段等待就是「收到 TERM 的瞬间拒连」：LB 摘流要数百毫秒到数秒，那段
 //     窗口的新连接拿到的是 TCP 层 connection refused，客户端重试策略往往不覆盖。
-//     这段等待要算进部署侧的宽限期预算，它与 app 的 stop_timeout 是串行相加的两段。
+//     这段等待发生在本组件的 Stop 里，因此**包含在** app 的 stop_timeout 之内、
+//     不是额外的一段：stop_timeout 要装得下 DrainDelay + HandlerTimeout + 余量
+//     （默认 5 + 15 + 5 = 25s），改其中任何一个都要回头看另外两个。
+//
+// 两类上限的默认值就是生产值，调它们之前先读对应常量的注释：
+//   - 请求体 Config.MaxRequestBytes 默认 4MiB，与 grpc-go 的收包上限同尺度。
+//     HTTP 端口没有它兜底，几个并发大报文就能把进程打到 OOM；负值即不限制。
+//   - 单连接并发流 grpc.MaxConcurrentStreams 默认 256。环回双端口形态下它还顶住
+//     HTTP 侧的在途并发（全部 HTTP 流量共用一条环回 ClientConn），超出的请求在
+//     客户端侧排队，表现为延迟上升而不是报错。
 //
 // 用法：
 //

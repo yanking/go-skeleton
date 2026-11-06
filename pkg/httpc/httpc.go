@@ -12,7 +12,13 @@
 // 空闲连接上限与 keep-alive 开关因此逐 Client 生效，互不干扰——共享
 // DefaultTransport 时这些旋钮一调就是全进程，一个下游的调优会踩到别的下游。
 // 响应体读取有大小上限（MaxBodyBytes），超限报错而非截断：截断的报文喂给调用方
-// 解析会得出错误结论。
+// 解析会得出错误结论。单主机连接数另有闸门（MaxConnsPerHost），一个慢下游不会
+// 把本进程的 fd 和 goroutine 吃光。
+//
+// 有一处刻意与 net/http 的默认不同：**跨主机重定向默认不跟随**。net/http 只剥
+// Authorization、Cookie 一类标准头，X-Api-Key、X-Signature 这些自定义凭证会被
+// 原样发往新主机。要跟随见 Config.FollowCrossHostRedirect（跳数上限与 net/http
+// 一致，仍是 10 跳）。
 package httpc
 
 import (

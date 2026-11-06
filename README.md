@@ -58,6 +58,11 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 `make docker SVC=<svc>` 出镜像（配置不打进镜像，由部署侧挂载）；探针、宽限期预算与
 凭证注入见 [docs/deploy.md](docs/deploy.md)。
 
+## 许可
+
+[MIT](LICENSE)。拿它起项目不必开源你的业务代码，保留 `LICENSE` 文件即可——
+`new-project` 会保留它，并在清单里说明要换成自己的许可证时怎么处理。
+
 ## 文档
 
 | 位置 | 内容 |

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
@@ -10,7 +11,18 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-// newMeterProvider 构造周期采集（默认 60s）的 MeterProvider；
+// defaultMetricInterval 指标采集与导出的默认间隔，与 OTel SDK 自身的默认值一致。
+const defaultMetricInterval = 60 * time.Second
+
+// metricInterval 取生效的采集间隔，零值归一到默认值。
+func metricInterval(cfg Config) time.Duration {
+	if cfg.MetricInterval <= 0 {
+		return defaultMetricInterval
+	}
+	return cfg.MetricInterval
+}
+
+// newMeterProvider 构造周期采集的 MeterProvider；
 // 停机时 Shutdown 会做最后一次采集并导出，短生命周期进程的数据不丢。
 func newMeterProvider(ctx context.Context, cfg Config, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
 	var exp sdkmetric.Exporter
@@ -33,6 +45,7 @@ func newMeterProvider(ctx context.Context, cfg Config, res *resource.Resource) (
 
 	return sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp,
+			sdkmetric.WithInterval(metricInterval(cfg)))),
 	), nil
 }

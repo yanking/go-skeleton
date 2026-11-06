@@ -20,17 +20,19 @@ func TestFixedBearerAuth(t *testing.T) {
 	ctx := metadata.NewIncomingContext(context.Background(),
 		metadata.Pairs("authorization", "Bearer tok"))
 
-	if err := authn(ctx, "/user.v1.UserService/GetUser"); err != nil {
+	if got, err := authn(ctx, "/user.v1.UserService/GetUser"); err != nil {
 		t.Errorf("凭证正确应放行, got %v", err)
+	} else if got != ctx {
+		t.Error("固定凭证策略无身份可注入，应原样返回传入的 ctx")
 	}
 
 	bad := metadata.NewIncomingContext(context.Background(),
 		metadata.Pairs("authorization", "Bearer wrong"))
-	if err := authn(bad, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+	if _, err := authn(bad, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 		t.Errorf("凭证错误应拒绝, got %v", err)
 	}
 
-	if err := authn(context.Background(), "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+	if _, err := authn(context.Background(), "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 		t.Errorf("缺凭证应拒绝, got %v", err)
 	}
 }
@@ -55,10 +57,55 @@ func TestFixedBearerAuthEmptyToken(t *testing.T) {
 			if c.header != "" {
 				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", c.header))
 			}
-			if err := authn(ctx, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
+			if _, err := authn(ctx, "/user.v1.UserService/GetUser"); !errors.Is(err, errcode.ErrUnauthenticated) {
 				t.Errorf("token 为空时应一律拒绝, got %v", err)
 			}
 		})
+	}
+}
+
+// TestBearerSchemeCaseInsensitive 守住 RFC 7235：auth-scheme 不区分大小写。
+// 原先只认 "Bearer " 前缀，小写 bearer 的客户端库会被判成未认证——
+// 不是安全问题，但报出来的错把排查方向带偏。
+func TestBearerSchemeCaseInsensitive(t *testing.T) {
+	const token = "right-token"
+	authn := FixedBearerAuth(token)
+	cases := []struct {
+		name    string
+		header  string
+		wantErr bool
+	}{
+		{name: "标准写法", header: "Bearer " + token},
+		{name: "全小写", header: "bearer " + token},
+		{name: "全大写", header: "BEARER " + token},
+		{name: "混合大小写", header: "BeArEr " + token},
+		{name: "错的 token 仍拒", header: "bearer wrong", wantErr: true},
+		{name: "别的 scheme 仍拒", header: "Basic " + token, wantErr: true},
+		{name: "没有空格仍拒", header: "Bearer" + token, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := metadata.NewIncomingContext(context.Background(),
+				metadata.Pairs("authorization", c.header))
+			_, err := authn(ctx, "/user.v1.UserService/GetUser")
+			if (err != nil) != c.wantErr {
+				t.Errorf("err got %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestFixedBearerAuthComparesDigest 守住比对不泄漏配置 token 的长度：
+// subtle.ConstantTimeCompare 在长度不等时直接返回 0，所以要先摘要再比。
+// 这里只能验行为（长度不同的错 token 一样被拒），耗时侧信道本身测不了。
+func TestFixedBearerAuthComparesDigest(t *testing.T) {
+	authn := FixedBearerAuth("right-token")
+	for _, wrong := range []string{"x", "wrong", "right-toke", "right-tokenn", strings.Repeat("y", 4096)} {
+		ctx := metadata.NewIncomingContext(context.Background(),
+			metadata.Pairs("authorization", "Bearer "+wrong))
+		if _, err := authn(ctx, "/m"); !errors.Is(err, errcode.ErrUnauthenticated) {
+			t.Errorf("错 token %q 应被拒, got %v", wrong, err)
+		}
 	}
 }
 
@@ -89,7 +136,7 @@ func TestAccessLogFields(t *testing.T) {
 			if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 				t.Fatalf("日志不是合法 JSON: %v", err)
 			}
-			for _, key := range []string{"rpc", "peer", "code", "duration"} {
+			for _, key := range []string{"proto", "call", "peer", "code", "duration"} {
 				if _, ok := got[key]; !ok {
 					t.Errorf("访问日志缺 %q 字段: %s", key, buf.String())
 				}
@@ -110,7 +157,7 @@ func TestPeerAddrUnknown(t *testing.T) {
 }
 
 func TestUnaryAuth(t *testing.T) {
-	alwaysReject := func(context.Context, string) error { return errcode.ErrUnauthenticated }
+	alwaysReject := func(context.Context, string) (context.Context, error) { return nil, errcode.ErrUnauthenticated }
 	unaryInfo := func(method string) *grpc.UnaryServerInfo { return &grpc.UnaryServerInfo{FullMethod: method} }
 	called := false
 	handler := func(context.Context, any) (any, error) { called = true; return "ok", nil }
@@ -124,7 +171,7 @@ func TestUnaryAuth(t *testing.T) {
 
 	t.Run("业务方法凭策略放行或拒绝", func(t *testing.T) {
 		called = false
-		if _, err := unaryAuth(func(context.Context, string) error { return nil })(
+		if _, err := unaryAuth(func(ctx context.Context, _ string) (context.Context, error) { return ctx, nil })(
 			context.Background(), nil, unaryInfo("/user.v1.UserService/GetUser"), handler); err != nil || !called {
 			t.Errorf("策略放行应到 handler, got err=%v called=%v", err, called)
 		}
@@ -143,7 +190,7 @@ type stubStream struct{ grpc.ServerStream }
 func (stubStream) Context() context.Context { return context.Background() }
 
 func TestStreamAuth(t *testing.T) {
-	alwaysReject := func(context.Context, string) error { return errcode.ErrUnauthenticated }
+	alwaysReject := func(context.Context, string) (context.Context, error) { return nil, errcode.ErrUnauthenticated }
 	called := false
 	handler := func(any, grpc.ServerStream) error { called = true; return nil }
 	info := &grpc.StreamServerInfo{FullMethod: "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"}

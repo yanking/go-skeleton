@@ -14,14 +14,14 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 ```
 
 - `<svc>` 为小写 kebab-case 服务名；同名服务已存在时脚本拒绝覆盖。
-- `[module]`：服务要承载多个业务域（单体，或已知还会加业务域）时给出首个模块名，五层骨架生成在 `internal/<svc>/<module>/` 下，`config` 仍在 `internal/<svc>/`；只承载一个业务域时不给，六件套平铺。怎么选见 AGENTS.md「服务分层」；以后再加模块用 `new-module` 技能，模块名规则同它。
+- `[module]`：服务要承载多个业务域（单体，或已知还会加业务域）时给出首个模块名。布局是**层优先**的——模块是层内的一级子目录，五层骨架生成在 `internal/<svc>/<层>/<module>/` 下，`config` 不分模块、仍在 `internal/<svc>/config`；只承载一个业务域时不给，各层直接放文件。怎么选见 AGENTS.md「服务分层」；以后再加模块用 `new-module` 技能，模块名规则同它。
 - 变体决定 `createServer` 里 transport 构造器与选项、yaml 的 `transport` 段：
   - `none`（默认）：无传输段，只有遥测——纯异步任务型或骨架先行；
   - `rpc`：纯 gRPC（内置 health 协议、reflection、errcode 出口拦截器），yaml 带 `transport.grpc_addr`；业务 pb 生成后用 `WithService` 注册。
   - `both`：`rpc` 再加 `WithGateway` 与 `http_addr`——proto 加 `google.api.http` 注解后 `make proto` 生成转译代码，HTTP 端口自带 `/healthz`，`/docs` 由 `WithMount` 挂 `openapi` 聚合包（spec embed + 阅读页）提供，该包仓内缺失时由脚本一并落地。
 - **形态由构造器决定**：`transport.NewRPCServer`（纯 gRPC）/ `NewRPCRESTServer`（gRPC + gateway 双端口）/ `NewRESTServer`（直连 REST，本技能暂无此变体入口，见 AGENTS.md「服务分层」）。生成的 `both` 骨架以 `NewRPCServer` 起步，业务 pb 就绪后换成 `NewRPCRESTServer`——构造器、`http_addr` 与 `WithGateway` **三者在同一次改动里放开**：`NewRPCRESTServer` 必配 `http_addr`，配了端口没有路由也会在装配期报错。
 - **传输开关就是 transport 段**：整段缺失即无对外出口。
-- 生成物：`cmd/<svc>/main.go`、`cmd/<svc>/initial/init_app.go`、`internal/<svc>/config/config.go`、`configs/<svc>.yaml`，以及 internal 分层骨架——所有变体含 `service/repo/model/job` 的 `doc.go`，rpc/both 变体额外含 `handler/doc.go`；给了 module 时，这些分层目录在 `internal/<svc>/<module>/` 下。
+- 生成物：`cmd/<svc>/main.go`、`cmd/<svc>/initial/init_app.go`、`internal/<svc>/config/config.go`、`configs/<svc>.yaml`，以及 internal 分层骨架——所有变体含 `service/repo/model/job` 的 `doc.go`，rpc/both 变体额外含 `handler/doc.go`；给了 module 时，各层下再多一级模块子目录（`internal/<svc>/<层>/<module>/`）。
 
 ## 生成后必做（顺序即检查清单）
 

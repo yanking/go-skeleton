@@ -39,8 +39,13 @@ type Config struct {
 	// Level 放行级别，零值即 slog.LevelInfo。slog.Level 实现了 encoding.TextUnmarshaler，
 	// 故配置文件里直接写 debug / info / warn / error（大小写不敏感，还支持 info+2 偏移）。
 	// 用具体类型而非 slog.Leveler，是为了让本 Config 能直接作 YAML 绑定目标——接口绑不进去。
-	// 将来要运行期调级，另加一个 yaml:"-" 的 *slog.LevelVar 字段让它优先即可，不必动这里。
+	// 要运行期调级用下面的 LevelVar。
 	Level slog.Level `yaml:"level"`
+	// LevelVar 运行期可调级别，非 nil 时取代 Level 成为 Handler 的判级依据，
+	// 初值由 New 置为 Level（配置文件说什么就从什么开始）。装配期传一个进来并自己留住
+	// 引用，运行期调 Set 即可改级别而不必重启——生产上临时开 debug 是最常见的排障动作，
+	// 重启会把现场一起丢掉。零值（nil）即级别固定，与只配 Level 的行为一致。
+	LevelVar *slog.LevelVar `yaml:"-"`
 	// Format 输出格式，零值取 FormatJSON。
 	Format Format `yaml:"format"`
 	// AddSource 是否附带调用点的文件与行号，默认关。

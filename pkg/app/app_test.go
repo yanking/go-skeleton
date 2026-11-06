@@ -219,7 +219,7 @@ func TestStopContextIsDecoupledFromRunContext(t *testing.T) {
 		want        time.Duration // 期望的停机 ctx 剩余时长上限
 	}{
 		{name: "显式配置停机超时", stopTimeout: 3 * time.Second, want: 3 * time.Second},
-		{name: "零值取默认 30s", stopTimeout: 0, want: 30 * time.Second},
+		{name: "零值取默认值", stopTimeout: 0, want: 25 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -292,6 +292,9 @@ func TestStopContinuesAfterBlockedStop(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("放弃等待应作为错误上报, got %v", err)
 	}
+	if !errors.Is(err, app.ErrStopTimeout) {
+		t.Errorf("停机超时应可经 ErrStopTimeout 判别（与运行期崩溃区分开）, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "grpc") {
 		t.Errorf("错误应标注卡住的组件名, got %q", err)
 	}
@@ -301,8 +304,45 @@ func TestStopContinuesAfterBlockedStop(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("宽限期被 grpc 耗尽，但 data 仍须被停止——跳过等于资源不释放")
 	}
-	if !errors.Is(dataStopErr, context.DeadlineExceeded) {
-		t.Errorf("宽限期耗尽后组件应拿到已过期的停机 ctx, got %v", dataStopErr)
+	// 关键：data 拿到的是自己那份预算、**未过期**。
+	//
+	// 原先全部组件共享一个总预算、先到先吃，被 grpc 挤到后面的 data 拿到已过期的
+	// ctx，于是它的 Stop「立刻强制关闭」——关库与仍在执行的 handler 重叠，
+	// handler 的下一条 SQL 撞上 sql: database is closed，事务做了一半；而日志
+	// 还把这个瞬间就返回的组件一并报成「宽限期耗尽」，真正卡住的 grpc 反而
+	// 看不出来。
+	if dataStopErr != nil {
+		t.Errorf("被挤到后面的组件应拿到未过期的预算，而不是一个已过期的 ctx, got %v", dataStopErr)
+	}
+}
+
+// 真正卡住的那个组件才被报成超时，瞬间返回的不该跟着背锅——否则排障时看不出
+// 到底是谁拖的。
+func TestStopTimeoutBlamesOnlyTheBlockedComponent(t *testing.T) {
+	rec := &recorder{}
+	data, grpc := newFake("data", rec), newFake("grpc", rec)
+	grpc.onStop = func(context.Context) { select {} } // 永不返回
+
+	waitStarted := startAll(data, grpc)
+	a := app.New(app.Config{Logger: discardLogger(), StopTimeout: 100 * time.Millisecond}, data, grpc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	waitStarted()
+	cancel()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("卡住的组件应作为错误上报")
+	}
+	if !strings.Contains(err.Error(), "grpc") {
+		t.Errorf("错误应点名 grpc, got %q", err)
+	}
+	if strings.Contains(err.Error(), "data") {
+		t.Errorf("瞬间返回的 data 不该被报成超时, got %q", err)
 	}
 }
 

@@ -39,10 +39,13 @@ func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (components []app.Component, tel *telemetry.Telemetry, db *pgsql.DB) {
 	// 遥测 Service 与日志同源（配置文件 log.name），避免两处各写一份服务名。
 	c.Telemetry.Service = c.Log.Service
+	// 遥测自身的日志（装配结果、SDK 导出失败）也走统一出口。
+	c.Telemetry.Logger = logger
 	tel = telemetry.New(ctx, c.Telemetry)
 	components = append(components, tel)
 
 	c.Pgsql.TracerProvider = tel.TracerProvider()
+	c.Pgsql.MeterProvider = tel.MeterProvider()
 	c.Pgsql.Logger = logger
 	db = pgsql.New(c.Pgsql)
 	components = append(components, db)
@@ -54,7 +57,7 @@ func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (com
 // 内网东西向服务，与原实现一致不挂鉴权；如需收紧加 WithAuthenticator。
 func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel *telemetry.Telemetry, db *pgsql.DB) (components []app.Component) {
 	// 出站 HTTP 客户端：渠道适配器共用，接遥测后下游调用埋 client span。
-	hc := httpc.New(httpc.Config{TracerProvider: tel.TracerProvider()})
+	hc := httpc.New(httpc.Config{TracerProvider: tel.TracerProvider(), MeterProvider: tel.MeterProvider()})
 
 	// 路由表在构造期完成首次加载：DB 不可达当场死，不带病上线。
 	svc, err := service.New(ctx, repo.New(db.DB), hc, logger)
@@ -81,6 +84,12 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 	// handler 只管返回 errcode，出口翻译由拦截器统一处理。
 	srv := transport.NewRPCServer(c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
+		transport.WithMeterProvider(tel.MeterProvider()),
+		// 就绪检查：装配期不 ping 库（DB 比进程晚就绪是常态）的另一半——
+		// 连不上库的实例不该接流量，否则编排系统会一直给它发请求。
+		transport.WithReadinessCheck(func(ctx context.Context) error {
+			return db.WithContext(ctx).Exec("SELECT 1").Error
+		}),
 		transport.WithLogger(logger),
 		transport.WithService(func(s *grpc.Server) {
 			channelv1.RegisterChannelServiceServer(s, handler.NewGRPC(svc))

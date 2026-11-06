@@ -195,7 +195,9 @@ init: ${name} 项目骨架
 基于 go-skeleton 模板骨架起步,module ${module}。
 
 模板层:pkg/ 公共包(生命周期、配置、日志、错误码、遥测、存储、传输、任务队列)、
-Makefile 工具链、buf 契约工具链、.agents/ 约束与技能。零业务服务。
+Makefile 与容器构建、buf 契约工具链、.agents/ 约束与技能。零业务服务。
+
+LICENSE 沿用模板的 MIT 声明(保留它是 MIT 的要求)。
 EOF
 if [ -n "$upstream_url" ]; then
 	git remote add upstream "$upstream_url"
@@ -206,5 +208,7 @@ echo "已改造为 ${name}(module ${module}),git 历史重置为单提交 main�
 [ -n "$upstream_url" ] && echo "模板仓已挂为 upstream：${upstream_url}"
 echo "下一步："
 echo "  1) 补 README.md 的一句话定位,按需删掉 pkg/ 里用不到的包(如只用 pgsql 就删 mysql)"
+echo "  1b) LICENSE 是模板的 MIT 声明,已保留——保留它就是全部义务,业务代码不必开源。"
+echo "      要换成自己的许可证:mv LICENSE LICENSE-go-skeleton 再放自己的 LICENSE,原声明不能删。"
 echo "  2) git remote add origin <你的新仓地址> && git push -u origin main"
 echo "  3) 用 new-service 技能起第一个服务(单体给出首个模块名,按模块分目录)：bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [module]"

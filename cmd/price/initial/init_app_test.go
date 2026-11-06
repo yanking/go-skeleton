@@ -23,7 +23,7 @@ import (
 // exchanges 为 nil 时等价于 yaml 里完全没写 exchanges 段。
 func testServerConfig(exchanges map[string]config.Exchange) config.Config {
 	return config.Config{
-		Pgsql:     pgsql.Config{Write: "postgres://u:p@127.0.0.1:1/db?sslmode=disable"},
+		Pgsql:     pgsql.Config{Write: "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=5&statement_timeout=10000"},
 		Redis:     redis.Config{Addrs: []string{"127.0.0.1:1"}},
 		Exchanges: exchanges,
 	}

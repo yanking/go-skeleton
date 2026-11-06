@@ -41,15 +41,27 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 
 ## 里面有什么
 
-`pkg/` 十二个公共包：`app` 组件生命周期、`conf` 配置、`log` 结构化日志、`errcode` 错误双通道、
+`pkg/` 十一个公共包：`app` 组件生命周期、`conf` 配置、`log` 结构化日志、`errcode` 错误双通道、
 `telemetry` 链路与指标、`mysql`/`pgsql`/`redis` 存储、`httpc` 出站 HTTP、`transport` 传输
 （三种形态：`NewRPCServer` 纯 gRPC、`NewRPCRESTServer` gRPC + gateway 双端口、`NewRESTServer` 直连 REST；
-拦截链含错误码出口翻译、访问日志、鉴权）、`httpserver` 基于 gin 的纯 HTTP 服务、`queue` asynq 任务队列。
+拦截链含错误码出口翻译、处理超时、访问日志、panic 兜底、鉴权；带请求体与连接上限、
+摘流窗口与 liveness/readiness 两个探针）、`queue` asynq 任务队列。
 
 `make help` 列出全部命令；`make check` 是提交门槛（build / vet / test 全绿 + gofmt 零漂移）。
-`make lint`（golangci-lint，配置见 `.golangci.yml`）与 `make vuln`（govulncheck 漏洞扫描）不并进 check——
-那会改动宪法第 5 条对门槛的定义。
-`.github/workflows/ci.yml` 在 push 与 PR 上跑 check / lint / vuln 三个 job——门槛由机器执行，不靠记得跑。
+`make lint`（golangci-lint，配置见 `.golangci.yml`）、`make vuln`（govulncheck 漏洞扫描）与
+`make race`（竞态检测）不并进 check——前两者会改动宪法第 5 条对门槛的定义，race 则是因为
+它让测试慢几倍而 check 每次改动都要跑。宪法第 4 条（凭证只写 `${ENV_NAME}` 引用）的判据在
+`test/secrets/`，它是普通 go test，所以已经在 check 里。
+`.github/workflows/ci.yml` 在 push、PR 与每周定时上跑 check / race / lint / vuln 四个 job——
+门槛由机器执行，不靠记得跑；定时触发是因为漏洞是时间的函数，仓库安静一个月不等于安全。
+
+`make docker SVC=<svc>` 出镜像（配置不打进镜像，由部署侧挂载）；探针、宽限期预算与
+凭证注入见 [docs/deploy.md](docs/deploy.md)。
+
+## 许可
+
+[MIT](LICENSE)。拿它起项目不必开源你的业务代码，保留 `LICENSE` 文件即可——
+`new-project` 会保留它，并在清单里说明要换成自己的许可证时怎么处理。
 
 ## 文档
 
@@ -59,4 +71,5 @@ bash .agents/skills/new-service/scripts/new_service.sh <svc> [none|rpc|both] [mo
 | [CONSTITUTION.md](CONSTITUTION.md) | 仓库最高约束，与其冲突的一律以它为准 |
 | `.agents/go-style.md` | 编码规范 |
 | `.agents/skills/` | 可执行技能：`new-project` 起项目、`new-service` 起服务、`new-module` 加模块 |
+| [docs/deploy.md](docs/deploy.md) | 部署参考：探针语义、宽限期预算、退出码、资源限制 |
 | [docs/toolbox.md](docs/toolbox.md) | 仓库级工具参考 |

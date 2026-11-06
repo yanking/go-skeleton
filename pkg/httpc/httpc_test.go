@@ -2,7 +2,9 @@
 package httpc_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -467,4 +469,147 @@ func TestOutboundLog(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestOutboundErrorOmitsQuery 钉住错误文本里的 query 同样脱敏。net/http 把完整
+// 请求 URL 拼进 *url.Error，于是一条出站日志里 url 字段是干净的、err 字段却带着
+// access_token，而这个错误还会上抛、被调用方再记一遍。
+//
+// 既有用例恰好各覆盖一半——带 query 的那条只断言 url 字段，网络错误那条用的是
+// 不带 query 的地址——交叉的这条路正是缺陷所在。
+func TestOutboundErrorOmitsQuery(t *testing.T) {
+	const secret = "sk-live-SUPERSECRET"
+	var buf bytes.Buffer
+	c := httpc.New(httpc.Config{Logger: slog.New(slog.NewJSONHandler(&buf, nil))})
+
+	// 127.0.0.1:1 必然拒连，凭证挂在 query 上。
+	url := "http://127.0.0.1:1/pay/notify?access_token=" + secret + "&sign=abc"
+	if _, _, err := c.Get(context.Background(), url, nil, 0); err == nil {
+		t.Fatal("连 127.0.0.1:1 应当失败")
+	} else if strings.Contains(err.Error(), secret) {
+		t.Errorf("上抛的错误泄漏了 query 里的凭证: %v", err)
+	}
+
+	if strings.Contains(buf.String(), secret) {
+		t.Errorf("出站日志泄漏了 query 里的凭证: %s", buf.String())
+	}
+	// 脱敏不能把定位信息一起洗掉：主机与 path 仍要在。
+	if !strings.Contains(buf.String(), "127.0.0.1:1/pay/notify") {
+		t.Errorf("脱敏后仍应留下 host 与 path: %s", buf.String())
+	}
+}
+
+// TestSanitizedErrorKeepsChain 脱敏换掉的只是 URL，错误链要原样挂着——
+// 否则调用方的 errors.Is 超时判断会失效。
+func TestSanitizedErrorKeepsChain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	c := httpc.New(httpc.Config{})
+	_, _, err := c.Get(context.Background(), srv.URL+"/x?token=secret", nil, 20*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("超时应仍能经 errors.Is 判出，got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Errorf("错误文本泄漏了 query: %v", err)
+	}
+}
+
+// TestCrossHostRedirectRefused 钉住跨主机重定向默认不跟随：net/http 只剥
+// Authorization、Cookie 一类标准头，X-Api-Key 这种自定义凭证会被原样发往新主机。
+func TestCrossHostRedirectRefused(t *testing.T) {
+	var mu sync.Mutex
+	var gotKey string
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotKey = r.Header.Get("X-Api-Key")
+		mu.Unlock()
+	}))
+	defer target.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	header := map[string]string{"X-Api-Key": "secret-key"}
+
+	t.Run("默认拒绝且凭证不外流", func(t *testing.T) {
+		c := httpc.New(httpc.Config{})
+		if _, _, err := c.Get(context.Background(), origin.URL, header, 0); err == nil {
+			t.Error("跨主机重定向应被拒绝")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if gotKey != "" {
+			t.Errorf("自定义凭证头被转发到了另一主机: %q", gotKey)
+		}
+	})
+
+	t.Run("显式开启后跟随", func(t *testing.T) {
+		c := httpc.New(httpc.Config{FollowCrossHostRedirect: true})
+		if _, _, err := c.Get(context.Background(), origin.URL, header, 0); err != nil {
+			t.Errorf("开了开关应当跟随，got %v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if gotKey != "secret-key" {
+			t.Errorf("跟随后终点应收到原请求头，got %q", gotKey)
+		}
+	})
+}
+
+// TestMaxConnsPerHostLimits 钉住单主机连接闸门真的生效：下游变慢时它是唯一能
+// 阻止 socket 与 fd 被在途请求吃光的东西（空闲连接上限管不了在用的那些）。
+func TestMaxConnsPerHostLimits(t *testing.T) {
+	const (
+		limit    = 2
+		requests = 6
+	)
+	var mu sync.Mutex
+	inflight, peak := 0, 0
+	release := make(chan struct{})
+	arrived := make(chan struct{}, requests)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		mu.Lock()
+		inflight++
+		if inflight > peak {
+			peak = inflight
+		}
+		mu.Unlock()
+		arrived <- struct{}{}
+		<-release
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	c := httpc.New(httpc.Config{MaxConnsPerHost: limit})
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, _ = c.Get(context.Background(), srv.URL, nil, 5*time.Second)
+		}()
+	}
+
+	// 等闸门放行的那几个到达；多出来的请求应当还在 Transport 里排队。
+	for range limit {
+		<-arrived
+	}
+	mu.Lock()
+	got := peak
+	mu.Unlock()
+
+	close(release)
+	wg.Wait()
+
+	if got > limit {
+		t.Errorf("同时在途请求峰值 %d，超过上限 %d", got, limit)
+	}
 }

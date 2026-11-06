@@ -42,10 +42,13 @@ func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (components []app.Component, tel *telemetry.Telemetry, db *pgsql.DB, qc *queue.Client) {
 	// 遥测 Service 与日志同源（配置文件 log.name），避免两处各写一份服务名。
 	c.Telemetry.Service = c.Log.Service
+	// 遥测自身的日志（装配结果、SDK 导出失败）也走统一出口。
+	c.Telemetry.Logger = logger
 	tel = telemetry.New(ctx, c.Telemetry)
 	components = append(components, tel)
 
 	c.Pgsql.TracerProvider = tel.TracerProvider()
+	c.Pgsql.MeterProvider = tel.MeterProvider()
 	c.Pgsql.Logger = logger
 	db = pgsql.New(c.Pgsql)
 	components = append(components, db)
@@ -82,7 +85,7 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 			Channel:       cc,
 			Queue:         qc,
 			// 出站 HTTP 客户端只用于给商户推通知；接遥测后每次通知都有 client span。
-			HTTP: httpc.New(httpc.Config{TracerProvider: tel.TracerProvider()}),
+			HTTP: httpc.New(httpc.Config{TracerProvider: tel.TracerProvider(), MeterProvider: tel.MeterProvider()}),
 		}, logger)
 
 	// 装配期先全量同步一次渠道实例：本地副本为空时选路无候选，等不到首个 job 周期
@@ -110,6 +113,12 @@ func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel
 	// 商户鉴权走的是报文签名（service.Authenticate），不是传输层 Authenticator。
 	srv := transport.NewRPCRESTServer(ctx, c.Transport,
 		transport.WithTracerProvider(tel.TracerProvider()),
+		transport.WithMeterProvider(tel.MeterProvider()),
+		// 就绪检查：装配期不 ping 库（DB 比进程晚就绪是常态）的另一半——
+		// 连不上库的实例不该接流量，否则编排系统会一直给它发请求。
+		transport.WithReadinessCheck(func(ctx context.Context) error {
+			return db.WithContext(ctx).Exec("SELECT 1").Error
+		}),
 		transport.WithLogger(logger),
 		transport.WithService(func(s *grpc.Server) {
 			paymentv1.RegisterPaymentServiceServer(s, handler.NewGRPC(svc))

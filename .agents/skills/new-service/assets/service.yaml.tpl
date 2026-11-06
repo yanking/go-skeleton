@@ -1,13 +1,58 @@
 # __svc__ 服务配置：只放声明式参数；Writer、Extractors 等装配期注入项不在此出现。
 # 凭证以带引号的环境变量引用注入（写法见 pkg/conf 包注释），启动时展开、未设置即起不来；明文不入库（宪法第 4 条）。
+# 部署相关的取值（探针、宽限期预算、生产必须改的几项）见 docs/deploy.md。
 
 log:
   name: __svc__
-  level: info
+  level: info # 生产留 info；临时开 debug 由 cmd 里的 LevelVar 在运行期调，不必重启、不丢现场
   format: json
 
 app:
-  stop_timeout: 30s # 停机总超时，须 ≤ 部署侧宽限期；省略即取 pkg/app 的 30s 默认
+  # 停机总超时。transport 的 drain_delay 与在途请求排空都在这个预算之内，
+  # 所以它要装得下 drain_delay + handler_timeout + 余量（默认 5 + 15 + 5）。
+  # 部署侧的宽限期再比它大几秒，见 docs/deploy.md。
+  stop_timeout: 25s
 
 telemetry:
-  exporter: stdout # 本地开发直接打标准输出；生产改 otlp 并配 endpoint（如 collector:4317）
+  # 本地开发打标准输出。**生产必须改成 otlp 并配 endpoint**——留 stdout 的话全部
+  # span 与 metric 会以 JSON 打进标准输出，量按 QPS 涨，还会把真日志挤出采集配额。
+  exporter: stdout
+  # endpoint: "collector:4317" # exporter 为 otlp 时必填
+  # insecure: true             # 本地 collector 无证书时才开，生产走 TLS
+  #
+  # 采样：默认全采（尊重上游决定，无上游时都采）。高 QPS 服务改成比例采样，
+  # 否则导出带宽与后端存储按 QPS 线性涨。
+  # sampler: parentbased_traceidratio
+  # sample_ratio: 0.05 # 比例采样时必填，取 (0,1]——留 0 的话一条都不采，且毫无征兆
+
+# 用到 PostgreSQL 时放开。DSN 的两个超时是硬要求（装配期校验）：零值即无限等待，
+# 网络分区且对端不发 RST 时，请求 goroutine 会连着连接一起卡到进程重启。
+#
+# 下面的凭证占位用的是**单美元符号**写法（$DB_PASSWORD）。pkg/conf 的展开是解析前的
+# 纯文本替换、不认注释，带花括号的引用即使写在注释里也会被展开、未设置就 panic——
+# 放开这些行时记得把 $NAME 改成带花括号的形式。
+# pgsql:
+#   write: "postgres://app:$DB_PASSWORD@127.0.0.1:5432/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
+#   read: # 副本，可空；空则全部语句走主库
+#     - "postgres://app:$DB_PASSWORD@127.0.0.1:5433/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
+#   max_open_conns: 20 # 库侧 max_connections 是全局资源，按 (库上限 - 预留) / (服务数 × 副本数) 调
+#
+# MySQL 版的硬要求多一项 parseTime=true：
+# mysql:
+#   write: "app:$DB_PASSWORD@tcp(127.0.0.1:3306)/app?parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
+
+# 用到 Redis 时放开。多地址必须显式声明 mode——按地址数推断会把两个独立的单机
+# 地址当成集群，而且不报错，只是键全落在其中一个节点上，重启换人即丢。
+# redis:
+#   addrs: ["127.0.0.1:6379"]
+#   password: "$REDIS_PASSWORD"
+#   mode: standalone # auto（仅单地址）/ standalone / cluster
+#   tls: false       # 托管 Redis 常强制加密传输，不开就连不上
+
+# 用到异步任务时放开。asynq 的 Redis 须是专用实例（maxmemory-policy noeviction），
+# 理由见 pkg/queue 包注释。
+# queue:
+#   addr: "127.0.0.1:6379"
+#   password: "$REDIS_PASSWORD"
+#   concurrency: 10
+#   pool_size: 20 # 并发数远高于池大小会大面积撞 ErrPoolTimeout

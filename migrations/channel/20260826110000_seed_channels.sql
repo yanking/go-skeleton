@@ -5,6 +5,9 @@
 -- Platform 结构体一一对应(见 internal/channel/adapter/<name>/config.go),照着填真值即可。
 --
 -- 真实渠道凭证一律不入仓库:由运维在部署环境直接写库,或经密钥管理下发。
+--
+-- nosecret: 密钥与口令全为 REPLACE_ME_ 前缀的占位符,域名为 RFC 2606 的 .invalid,
+-- IP 为 RFC 5737 文档段——三者都是可逐个核对的形式判据,不是「自称仅供演示」。
 -- +goose Up
 INSERT INTO channels (channel_name, merchant_no, currency, channel_level, callback_headers,
                       callback_data_source, callback_return, callback_ip_whitelist, payout_supports,

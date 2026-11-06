@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -44,6 +46,16 @@ const defaultMaxBodyBytes = 4 << 20
 // 上限同量级，调用方按自己的并发配。
 const defaultMaxIdleConnsPerHost = 32
 
+// defaultMaxConnsPerHost 缺省单主机连接数上限（在用 + 空闲）。http.Transport 的
+// 默认值是 0 即不限制：下游变慢时每个在途请求各占一条 socket，QPS 乘以响应时长
+// 就是连接数，容器常见的 1024 fd 配额很快见底，连不相关的 DB / Redis 都建不起
+// 连接。取 64（空闲上限的两倍）给突发留余量，超限的请求在 Transport 里排队等待，
+// 不报错。
+const defaultMaxConnsPerHost = 64
+
+// maxRedirects 重定向跳数上限，与 net/http 的默认值一致。
+const maxRedirects = 10
+
 // Config 客户端装配参数。
 type Config struct {
 	// Timeout 单次请求总超时缺省值（含连接、重定向与读体），零值取 15s；
@@ -57,9 +69,22 @@ type Config struct {
 	// MaxBodyBytes 单次响应体读取上限，零值取 4MiB，负值即不设上限。
 	// 超限返回错误且不返回内容——截断的报文解析出来是错的结论，报错才安全。
 	MaxBodyBytes int64 `yaml:"max_body_bytes"`
-	// MaxIdleConnsPerHost 单主机空闲连接上限，零值取 32。按调用方对该下游的并发
-	// 上限配：低于并发数的部分会退化成每笔请求一次握手。
+	// MaxIdleConnsPerHost 单主机空闲连接上限，零值取 defaultMaxIdleConnsPerHost。
+	// 按调用方对该下游的并发上限配：低于并发数的部分会退化成每笔请求一次握手。
 	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
+	// MaxConnsPerHost 单主机连接数上限（在用 + 空闲），零值取 defaultMaxConnsPerHost；
+	// 负值即不限制（请先读那个常量的注释再决定）。
+	MaxConnsPerHost int `yaml:"max_conns_per_host"`
+	// MeterProvider 指标注入项，nil 则不埋出站指标（请求数、耗时分布、在途请求数）。
+	MeterProvider metric.MeterProvider `yaml:"-"`
+	// FollowCrossHostRedirect 是否跟随跨主机重定向，默认不跟。
+	//
+	// 不跟是默认值，因为 net/http 只剥 Authorization、Cookie 一类标准头，
+	// X-Api-Key、X-Signature 这些自定义凭证会被原样发往新主机：下游被攻破或
+	// 返回恶意 302 就等于把凭证送出去，302 指向 169.254.169.254 还能读到云元数据。
+	// 确实需要跨主机跳转（如对象存储的签名下载链接）时才开，并确认请求头里
+	// 没有自带凭证。同主机的重定向一律照常跟随。
+	FollowCrossHostRedirect bool `yaml:"follow_cross_host_redirect"`
 	// DisableKeepAlives 关掉连接复用，每次请求都新建连接。
 	//
 	// 只为一种情形而设：**下游只接受 GET 的非幂等接口**。net/http 会在复用的
@@ -95,9 +120,17 @@ func New(cfg Config) *Client {
 	if idlePerHost <= 0 {
 		idlePerHost = defaultMaxIdleConnsPerHost
 	}
+	connsPerHost := cfg.MaxConnsPerHost
+	switch {
+	case connsPerHost == 0:
+		connsPerHost = defaultMaxConnsPerHost
+	case connsPerHost < 0:
+		connsPerHost = 0 // 负值即不限制
+	}
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.MaxIdleConnsPerHost = idlePerHost
+	tr.MaxConnsPerHost = connsPerHost
 	tr.DisableKeepAlives = cfg.DisableKeepAlives
 	// 全局空闲上限不得低于单主机上限，否则单主机那档形同虚设。
 	if tr.MaxIdleConns < idlePerHost {
@@ -105,14 +138,37 @@ func New(cfg Config) *Client {
 	}
 
 	var rt http.RoundTripper = tr
-	if cfg.TracerProvider != nil {
+	if cfg.TracerProvider != nil || cfg.MeterProvider != nil {
 		// 仓库不设 otel 全局，propagator 同样显式给出：出站带 W3C traceparent，
 		// 同栈下游可续链，不认识该头的三方忽略即可，无副作用。
-		rt = otelhttp.NewTransport(rt,
-			otelhttp.WithTracerProvider(cfg.TracerProvider),
-			otelhttp.WithPropagators(propagation.TraceContext{}))
+		// 只注入其中一个 Provider 时，另一类遥测回落到 otel 的 no-op 全局。
+		opts := []otelhttp.Option{otelhttp.WithPropagators(propagation.TraceContext{})}
+		if cfg.TracerProvider != nil {
+			opts = append(opts, otelhttp.WithTracerProvider(cfg.TracerProvider))
+		}
+		if cfg.MeterProvider != nil {
+			opts = append(opts, otelhttp.WithMeterProvider(cfg.MeterProvider))
+		}
+		rt = otelhttp.NewTransport(rt, opts...)
 	}
-	return &Client{hc: &http.Client{Transport: rt}, timeout: timeout, maxBodyBytes: maxBody, log: cfg.Logger}
+
+	hc := &http.Client{Transport: rt, CheckRedirect: redirectPolicy(cfg.FollowCrossHostRedirect)}
+	return &Client{hc: hc, timeout: timeout, maxBodyBytes: maxBody, log: cfg.Logger}
+}
+
+// redirectPolicy 返回重定向策略：跳数上限照 net/http 的默认，跨主机按配置决定
+// 跟不跟（默认不跟，理由见 Config.FollowCrossHostRedirect）。
+func redirectPolicy(followCrossHost bool) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("重定向超过 %d 跳", maxRedirects)
+		}
+		if !followCrossHost && req.URL.Host != via[0].URL.Host {
+			return fmt.Errorf("拒绝跨主机重定向: %s 指向 %s（要跟随请开 FollowCrossHostRedirect）",
+				via[0].URL.Host, req.URL.Host)
+		}
+		return nil
+	}
 }
 
 // PostJSON 发 JSON POST：body 序列化后发出，Content-Type 置 application/json
@@ -185,7 +241,7 @@ func (c *Client) do(req *http.Request, timeout time.Duration) (code int, body st
 
 	resp, err := c.hc.Do(req.WithContext(ctx))
 	if err != nil {
-		return 0, "", fmt.Errorf("发起请求: %w", err)
+		return 0, "", fmt.Errorf("发起请求: %w", sanitizeErr(err))
 	}
 	defer resp.Body.Close()
 
@@ -214,6 +270,23 @@ func sanitizeURL(u *neturl.URL) string {
 	}
 	safe := neturl.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 	return safe.String()
+}
+
+// sanitizeErr 把 *url.Error 携带的 URL 换成脱敏版本。net/http 把完整请求 URL
+// （含 query）拼进错误文本，于是同一条出站日志里 url 字段是干净的、err 字段却
+// 带着 access_token——而这个错误还会上抛，调用方很可能再记一遍。只换 URL：
+// 内层错误原样挂着，errors.Is/As 与 Timeout() 判断都不受影响。
+func sanitizeErr(err error) error {
+	var uerr *neturl.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	parsed, parseErr := neturl.Parse(uerr.URL)
+	if parseErr != nil {
+		// 解析不了就把 URL 整个丢掉——不能赌一个解析不了的串里没有凭证。
+		return &neturl.Error{Op: uerr.Op, Err: uerr.Err}
+	}
+	return &neturl.Error{Op: uerr.Op, URL: sanitizeURL(parsed), Err: uerr.Err}
 }
 
 // logOutbound 出站收口日志：一次出站恰好一条。成功且 2xx 记 Info，网络错误或非 2xx

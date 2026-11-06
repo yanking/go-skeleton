@@ -1,3 +1,3 @@
 package auth
 
-import _ "example.com/m/internal/shop/config"
+import _ "example.com/m/internal/shop/common/model"

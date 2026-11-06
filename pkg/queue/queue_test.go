@@ -2,11 +2,14 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/yanking/go-skeleton/pkg/app"
 )
 
 func TestConfigValidate(t *testing.T) {
@@ -17,6 +20,9 @@ func TestConfigValidate(t *testing.T) {
 	}{
 		{name: "addr 缺失", cfg: Config{}, wantErr: true},
 		{name: "addr 非空", cfg: Config{Addr: "127.0.0.1:6379"}, wantErr: false},
+		{name: "并发数为负", cfg: Config{Addr: "h:6379", Concurrency: -1}, wantErr: true},
+		{name: "池大小为负", cfg: Config{Addr: "h:6379", PoolSize: -1}, wantErr: true},
+		{name: "停机超时为负", cfg: Config{Addr: "h:6379", ShutdownTimeout: -1}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -148,5 +154,77 @@ func TestWorkerStopIsIdempotent(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("第 %d 次 Stop() 不应阻塞", i)
 		}
+	}
+}
+
+// TestClientIsComponent 钉住 Client 能直接交给 pkg/app 编排。
+//
+// 不实现组件接口的话，任何会入队的服务都得自己手搓一个包装器才能把它放进
+// createInfra 的 []app.Component——或者干脆忘掉 Close，于是停机时 Redis 连接
+// 不被优雅关闭、服务端留下半开连接。这正是「模式复制到第 10 个服务」时每次
+// 都要重做一遍的地方。
+func TestClientIsComponent(t *testing.T) {
+	var _ app.Component = (*Client)(nil)
+
+	c := NewClient(Config{Addr: "127.0.0.1:6379"})
+	if got := c.Name(); got != "queue-client" {
+		t.Errorf("Name got %q, want %q", got, "queue-client")
+	}
+	if err := c.Start(context.Background()); err != nil {
+		t.Errorf("Start got %v, want nil", err)
+	}
+	if err := c.Stop(context.Background()); err != nil {
+		t.Errorf("Stop got %v, want nil", err)
+	}
+}
+
+// TestRedisOptMapping 钉住连接参数的映射：Username 与 TLS 漏传就连不上托管 Redis
+// （ElastiCache 的 in-transit encryption、Azure Cache 默认强制 TLS、Redis 6 ACL）。
+func TestRedisOptMapping(t *testing.T) {
+	opt := Config{
+		Addr: "h:6379", Username: "app", Password: "pw", DB: 3,
+		PoolSize: 7, TLS: true,
+	}.redisOpt()
+
+	if opt.Addr != "h:6379" || opt.Username != "app" || opt.Password != "pw" {
+		t.Errorf("连接参数未透传: %+v", opt)
+	}
+	if opt.DB != 3 || opt.PoolSize != 7 {
+		t.Errorf("DB/PoolSize 未透传: %+v", opt)
+	}
+	if opt.TLSConfig == nil {
+		t.Error("配了 tls: true 应给出 TLSConfig")
+	} else if opt.TLSConfig.InsecureSkipVerify {
+		t.Error("不应跳过证书校验——那是最常见的降级误用")
+	}
+
+	if plain := (Config{Addr: "h:6379"}).redisOpt(); plain.TLSConfig != nil {
+		t.Error("未配 tls 不应给 TLSConfig")
+	}
+}
+
+// TestWorkerHealthy 钉住队列健康状态的流转。
+//
+// 没有这条通路时，Worker 起来之后 Redis 才不可用的情形完全没有信号：asynq 内部
+// 重试并打日志，Start 早已返回、app 收不到致命错误，实例一直报「就绪」而任务在
+// 堆积——纯异步服务（none 变体）尤其危险，进程里没有任何会退出的组件。
+func TestWorkerHealthy(t *testing.T) {
+	w := NewWorker(Config{Addr: "127.0.0.1:6379"}, nil)
+
+	// 尚未跑过检查：不把实例判为不就绪，否则每次发布都要多等一个检查周期。
+	if err := w.Healthy(); err != nil {
+		t.Errorf("未跑过检查时应为健康, got %v", err)
+	}
+
+	down := errors.New("dial tcp 127.0.0.1:6379: connect: connection refused")
+	w.recordHealth(down)
+	if err := w.Healthy(); !errors.Is(err, down) {
+		t.Errorf("检查失败后应报出原因, got %v", err)
+	}
+
+	// 恢复后要能回到健康，否则一次抖动就把实例永久摘掉。
+	w.recordHealth(nil)
+	if err := w.Healthy(); err != nil {
+		t.Errorf("恢复后应回到健康, got %v", err)
 	}
 }

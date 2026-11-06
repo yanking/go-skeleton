@@ -12,7 +12,7 @@ telemetry:
   exporter: stdout
 
 pgsql:
-  write: "postgres://app:app@127.0.0.1:5432/app?sslmode=disable"
+  write: "postgres://app:app@127.0.0.1:5432/app?sslmode=disable&connect_timeout=5&statement_timeout=10000" # nosecret: 本地容器的一次性默认口令（宪法第 4 条的例外）；生产由部署侧下发写成 ${DB_PASSWORD} 的配置
   max_open_conns: 20
   conn_max_lifetime: 30m
 

@@ -10,7 +10,13 @@ plugins:
     opt: paths=source_relative
   - local: protoc-gen-grpc-gateway
     out: gen
-    opt: paths=source_relative
+    # request_context 显式钉住（插件默认值就是 true，但语义不该随插件版本漂移）：
+    # 生成代码以 req.Context() 为请求 handler ctx 的父，于是客户端断连会取消
+    # handler ctx。改成 false 的话，所有在途请求会在停机信号落地的瞬间被集体
+    # 取消，http.Server 的优雅排空当场失效——这个雷从代码里看不出来。
+    opt:
+      - paths=source_relative
+      - request_context=true
   # OpenAPI v3 文档:api/<svc>/v1/x.proto → openapi/<svc>/v1/x.openapi.json,
   # 由根级 openapi 包 embed 后经各服务 HTTP 出口的 /docs 提供。
   - local: protoc-gen-openapiv3

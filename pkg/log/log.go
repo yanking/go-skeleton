@@ -24,7 +24,13 @@ func New(cfg Config) *slog.Logger {
 	if w == nil {
 		w = os.Stdout
 	}
-	opts := &slog.HandlerOptions{Level: cfg.Level, AddSource: cfg.AddSource}
+	// LevelVar 在时由它判级（以 Level 为初值），调用方留着引用即可运行期调级。
+	var level slog.Leveler = cfg.Level
+	if cfg.LevelVar != nil {
+		cfg.LevelVar.Set(cfg.Level)
+		level = cfg.LevelVar
+	}
+	opts := &slog.HandlerOptions{Level: level, AddSource: cfg.AddSource}
 
 	var handler slog.Handler
 	switch cfg.Format {

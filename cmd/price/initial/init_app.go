@@ -56,15 +56,19 @@ func App(ctx context.Context, c config.Config, logger *slog.Logger) error {
 func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (components []app.Component, tel *telemetry.Telemetry, db *pgsql.DB, rdb *redis.DB) {
 	// 遥测 Service 与日志同源（配置文件 log.name），避免两处各写一份服务名。
 	c.Telemetry.Service = c.Log.Service
+	// 遥测自身的日志（装配结果、SDK 导出失败）也走统一出口。
+	c.Telemetry.Logger = logger
 	tel = telemetry.New(ctx, c.Telemetry)
 	components = append(components, tel)
 
 	c.Pgsql.TracerProvider = tel.TracerProvider()
+	c.Pgsql.MeterProvider = tel.MeterProvider()
 	c.Pgsql.Logger = logger
 	db = pgsql.New(c.Pgsql)
 	components = append(components, db)
 
 	c.Redis.TracerProvider = tel.TracerProvider()
+	c.Redis.MeterProvider = tel.MeterProvider()
 	c.Redis.Logger = logger
 	rdb = redis.New(c.Redis)
 	components = append(components, rdb)
@@ -79,7 +83,7 @@ func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (com
 // 调用方——warmup 要用它们跑首轮 Plans + Rebuild。
 func createServer(c config.Config, logger *slog.Logger, tel *telemetry.Telemetry, db *pgsql.DB, rdb *redis.DB) (components []app.Component, svc *service.Price, managers map[string]*stream.Manager) {
 	// 出站 HTTP 客户端：两个交易所 adapter 共用，接遥测后下游调用埋 client span。
-	hc := httpc.New(httpc.Config{TracerProvider: tel.TracerProvider()})
+	hc := httpc.New(httpc.Config{TracerProvider: tel.TracerProvider(), MeterProvider: tel.MeterProvider()})
 
 	deps := service.Deps{
 		Instruments: repo.NewInstrument(db.DB),

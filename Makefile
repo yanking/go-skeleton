@@ -12,7 +12,7 @@ CMDS := $(notdir $(wildcard cmd/*))
 SVC ?= $(firstword $(CMDS))
 
 .DEFAULT_GOAL := help
-.PHONY: help new-project build run vet test check lint vuln fmt tidy tools proto proto-lint apidoc migrate-create migrate-up migrate-down migrate-status e2e clean
+.PHONY: help new-project build run vet test race check lint vuln fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e docker clean
 
 help: ## 显示帮助
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -38,6 +38,12 @@ vet: ## 静态检查 go vet ./...
 test: ## 全量测试 go test ./...
 	go test ./...
 
+# race 不并进 check:它让测试慢几倍,而 check 是每次改动都要跑的。
+# 本仓的核心是并发组件编排(pkg/app 的启停、pkg/transport 的停机),所以它必须有
+# 机器判据——由 CI 的 race job 每次 push/PR 跑,而不是靠开发者记得。
+race: ## 竞态检测 go test -race ./...
+	go test -race ./...
+
 # 四步各占一行:make 逐行执行、非零即停,失败时报出的就是失败的那一步。
 # 不要合成 `a && b && c || d` ——那种写法会把任何一步的失败都归因到最后的 d。
 check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
@@ -46,8 +52,11 @@ check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
 	go test ./...
 	@drift=$$(gofmt -l .); test -z "$$drift" || { echo "$$drift"; echo ">> 存在未格式化文件,运行 make fmt"; exit 1; }
 
-# lint / vuln 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
-# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI(.github/workflows/ci.yml)里各占一个 job。
+# lint / vuln / race 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
+# 改它的语义属于宪法修订(须单独提交、单独评审)。三者在 CI(.github/workflows/ci.yml)里各占一个 job。
+#
+# 宪法第 4 条(凭证只能写 ${ENV_NAME} 引用)的机器判据在 test/secrets/,它是普通的
+# go test,因此已经在 check 里——窄规则做成测试,比引入通用 secret 扫描工具更合身。
 lint: tools ## golangci-lint 全量检查(linter 选取与例外见 .golangci.yml)
 	$(TOOLS_DIR)/golangci-lint run ./...
 
@@ -90,18 +99,6 @@ proto-lint: tools ## buf lint + 破坏性变更检查(基线默认为当前分�
 		echo ">> 要比对别的基线: make proto-lint BREAKING_BASE=origin/<分支>"; \
 	fi
 
-# 接口文档(http 形态的服务):swag 从 handler 注释生成 OpenAPI 3.1,落到 openapi/<svc>/v1/<svc>.openapi.json,
-# /docs 阅读页(openapi 包 embed)与前端的类型生成都读它。swag 只在这里生成文件,不进服务的依赖;
-# 版本钉在 tools/go.mod(v2 尚是候选版,只输出 JSON、不生成 docs.go,运行时不依赖它)。
-APIDOC_TMP := $(BIN_DIR)/apidoc
-
-apidoc: tools ## 生成 http 形态服务的 OpenAPI 3.1 文档: make apidoc SVC=<svc>
-	@test -n "$(SVC)" -a -d "cmd/$(SVC)" || { echo ">> 服务不存在。用法: make apidoc SVC=<svc>;现有: $(CMDS)"; exit 1; }
-	@rm -rf $(APIDOC_TMP) && mkdir -p openapi/$(SVC)/v1
-	$(TOOLS_DIR)/swag init --v3.1 --quiet --outputTypes json -g main.go -d cmd/$(SVC),internal/$(SVC),pkg/httpserver -o $(APIDOC_TMP)
-	@mv $(APIDOC_TMP)/swagger.json openapi/$(SVC)/v1/$(SVC).openapi.json && rm -rf $(APIDOC_TMP)
-	@echo ">> 已生成 openapi/$(SVC)/v1/$(SVC).openapi.json"
-
 # 数据库迁移(goose):迁移文件按服务放 migrations/<svc>/,序号统一用 migrate-create 生成的
 # 年月日时间戳(手写小序号与其混用会打乱应用顺序)。DSN 默认从 configs/<svc>.yaml 的 pgsql.write
 # 提取(值须带引号)——服务与库天然对应;部署侧/CI 必须显式注入 MIGRATE_DSN 环境变量覆盖,防止
@@ -109,7 +106,11 @@ apidoc: tools ## 生成 http 形态服务的 OpenAPI 3.1 文档: make apidoc SVC
 # goose_db_version(本文件不传 -table,后果与改法见 AGENTS.md「服务分层」迁移段)。
 GOOSE       := $(TOOLS_DIR)/goose
 MIGRATE_DIR := migrations/$(SVC)
-MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null)
+# 提取后要剥掉 statement_timeout:服务配置里它是 10s 量级(防业务 SQL 跑飞),而大表的
+# CREATE INDEX、ALTER TABLE、数据回填动辄几分钟,带着它跑会被库端
+# "canceling statement due to statement timeout" 中断在半途——迁移做了一半最难收拾。
+# 两条 sed 分别处理「参数在中间」与「参数在末尾」两种位置。
+MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null | sed -E 's/statement_timeout=[0-9]+&//; s/[?&]statement_timeout=[0-9]+//')
 
 migrate-create: ## 新建迁移文件: make migrate-create SVC=<svc> NAME=create_xxx
 	@test -n "$(SVC)" || { echo ">> 无服务可迁移,先用 new-service 技能生成"; exit 1; }
@@ -139,6 +140,16 @@ e2e: ## 端对端测试: make e2e SVC=<svc>(前置见 test/e2e/<svc>/run.sh 头�
 	@test -x test/e2e/$(SVC)/run.sh || { echo ">> 暂无 $(SVC) 的端对端测试(test/e2e/$(SVC)/run.sh 不存在)"; exit 1; }
 	@test -x "$(GOOSE)" || $(MAKE) --no-print-directory tools
 	test/e2e/$(SVC)/run.sh
+
+# 容器镜像:配置不打进镜像(同一镜像跑所有环境,配置由部署侧挂载),理由见 Dockerfile
+# 顶部与 docs/deploy.md。Go 版本从 go.mod 提取后传进去,版本只有一个来源。
+GO_VERSION := $(shell sed -n 's/^go \([0-9.]*\)$$/\1/p' go.mod)
+
+docker: ## 构建服务镜像: make docker SVC=<svc> [TAG=<tag>]
+	@test -n "$(SVC)" -a -d "cmd/$(SVC)" || { echo ">> 服务不存在。用法: make docker SVC=<name>;现有: $(if $(CMDS),$(CMDS),无——先用 new-service 技能生成)"; exit 1; }
+	@test -n "$(GO_VERSION)" || { echo ">> 从 go.mod 取不到 go 版本"; exit 1; }
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg SVC=$(SVC) \
+		-t $(SVC):$(if $(TAG),$(TAG),dev) .
 
 clean: ## 清理构建产物
 	rm -rf $(BIN_DIR)

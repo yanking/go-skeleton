@@ -10,7 +10,13 @@
 // 错误语义：Worker.Handle 注册的处理函数返回 nil 视为任务完成；返回非 nil
 // error 触发 asynq 按内置退避策略重试，重试耗尽后任务进入 archived 队列——
 // 与宪法第 1 条「错误必须上抛」对齐，本包不吞并处理函数的错误、也不代为决定
-// 放弃重试。
+// 放弃重试。每次失败都会记一条带 typename、task_id、已重试次数与错误原文的
+// 日志（asynq 本身只把错误写进 Redis 的 task 记录，进程日志里只有一串 UUID，
+// 要另装 asynqmon 才看得到——那等于把失败原因藏起来）。
+//
+// 重试的默认跨度要知道：asynq 默认 MaxRetry=25，退避是 n^4+15+rand(30)(n+1) 秒，
+// 25 次累计约 20 天，第 11 次就已经是 2.8 小时之后。多数业务要的不是这个，
+// 入队时用 MaxRetry 显式给一个（与 Timeout 同样需要显式表态）。
 //
 // 用法：
 //
@@ -27,6 +33,7 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,15 +50,51 @@ type Config struct {
 	Password string `yaml:"password"`
 	// DB 选库序号。
 	DB int `yaml:"db"`
+	// Username ACL 用户名（Redis 6+），无则留空走默认用户。
+	Username string `yaml:"username"`
+	// TLS 是否经 TLS 连接。托管 Redis 常强制加密传输（ElastiCache 的
+	// in-transit encryption、Azure Cache 默认），不开就连不上。
+	TLS bool `yaml:"tls"`
 	// Concurrency Worker 并发处理数，仅 Worker 使用；零值取 asynq 默认
 	// （当前进程可用 CPU 数）。
 	Concurrency int `yaml:"concurrency"`
+	// PoolSize Redis 连接池大小，零值取 go-redis 默认（10×GOMAXPROCS）。
+	//
+	// 与 Concurrency 配套看：并发数远高于池大小时，worker 会大面积撞上
+	// ErrPoolTimeout（go-redis 的池等待上限是 ReadTimeout+1s），任务因此超时
+	// 失败并进入重试。2 核容器的默认池是 20，配 concurrency: 100 就是这个下场。
+	PoolSize int `yaml:"pool_size"`
+	// ShutdownTimeout Worker 停机时等待在途任务的时长，零值取 asynq 默认 8s。
+	//
+	// 它从 app 的 stop_timeout 预算里扣，且 worker 按注册顺序通常是最先停的
+	// 那个——配得太大会把传输层的排空窗口挤掉（见 Worker.Stop）。
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+}
+
+// redisOpt 组装 asynq 的 Redis 连接参数，Client 与 Worker 共用。
+func (c Config) redisOpt() asynq.RedisClientOpt {
+	opt := asynq.RedisClientOpt{
+		Addr:     c.Addr,
+		Username: c.Username,
+		Password: c.Password,
+		DB:       c.DB,
+		PoolSize: c.PoolSize,
+	}
+	if c.TLS {
+		// 只给默认值：系统根证书、版本下限。不暴露 InsecureSkipVerify——
+		// 「连不上就跳过校验」是最常见的降级误用（与 pkg/redis 同一取舍）。
+		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	return opt
 }
 
 // Validate 实现 conf 的校验钩子：Addr 缺失在装配期即报错。
 func (c Config) Validate() error {
 	if c.Addr == "" {
 		return errors.New("addr 不能为空")
+	}
+	if c.Concurrency < 0 || c.PoolSize < 0 || c.ShutdownTimeout < 0 {
+		return errors.New("concurrency、pool_size、shutdown_timeout 不能为负")
 	}
 	return nil
 }
@@ -115,11 +158,7 @@ func NewClient(cfg Config) *Client {
 	if err := cfg.Validate(); err != nil {
 		panic(fmt.Errorf("装配 queue.Client: %w", err))
 	}
-	opt := asynq.RedisClientOpt{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
-	}
+	opt := cfg.redisOpt()
 	return &Client{c: asynq.NewClient(opt), insp: asynq.NewInspector(opt)}
 }
 
@@ -157,6 +196,20 @@ func (c *Client) Close() error {
 	return errors.Join(c.insp.Close(), c.c.Close())
 }
 
+// Name 实现 app.Component。
+func (c *Client) Name() string { return "queue-client" }
+
+// Start 实现 app.Component：入队客户端惰性建连，无需启动动作。
+func (c *Client) Start(context.Context) error { return nil }
+
+// Stop 实现 app.Component：关闭连接，等价于 Close。
+//
+// Client 实现组件接口是为了能直接交给 pkg/app 编排：任何会入队的服务都要持有
+// 它，而装配动线（cmd/<svc>/initial 的 createInfra）只收 []app.Component——
+// 不实现的话每个服务都得自己手搓一个包装器，或者干脆忘掉 Close，于是停机时
+// Redis 连接不被优雅关闭、服务端留下半开连接。
+func (c *Client) Stop(context.Context) error { return c.Close() }
+
 // Worker 任务消费者，实现 app.Component：Start 启动内部处理协程，Stop 优雅
 // 停机、等待在途任务完成。
 type Worker struct {
@@ -173,13 +226,29 @@ func NewWorker(cfg Config, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	srv := asynq.NewServer(
-		asynq.RedisClientOpt{Addr: cfg.Addr, Password: cfg.Password, DB: cfg.DB},
-		asynq.Config{
-			Concurrency: cfg.Concurrency,
-			Logger:      slogLogger{logger: logger},
-		},
-	)
+	srv := asynq.NewServer(cfg.redisOpt(), asynq.Config{
+		Concurrency:     cfg.Concurrency,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		Logger:          slogLogger{logger: logger},
+		// 处理函数的错误必须进日志。asynq 只把它写进 Redis 的 task 记录，
+		// 进程日志里只有一串 UUID（retry 分支连错误都不记，archive 分支只说
+		// 「Retry exhausted for task id=...」），于是下游三方挂了的时候，
+		// 看日志完全不知道为什么失败——要另装 asynqmon 才看得到。
+		// 包注释与宪法第 1 条都承诺不吞处理函数的错误，这里才算兑现。
+		ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+			attrs := []any{"typename", task.Type(), "err", err}
+			if id, ok := asynq.GetTaskID(ctx); ok {
+				attrs = append(attrs, "task_id", id)
+			}
+			if retried, ok := asynq.GetRetryCount(ctx); ok {
+				attrs = append(attrs, "retried", retried)
+			}
+			if maxRetry, ok := asynq.GetMaxRetry(ctx); ok {
+				attrs = append(attrs, "max_retry", maxRetry)
+			}
+			logger.ErrorContext(ctx, "任务处理失败", attrs...)
+		}),
+	})
 	return &Worker{mux: asynq.NewServeMux(), srv: srv}
 }
 
@@ -216,11 +285,13 @@ func (w *Worker) Start(context.Context) error {
 // 队列等待重试。Shutdown 对尚未 Start 的 Server 是空操作，容忍「组件尚未真正运行时
 // 被 Stop」的场景。
 //
-// 注意本方法的等待时长由 asynq.Config.ShutdownTimeout 决定（未配置即 asynq 默认
-// 8s），与传入的 ctx 无关——asynq 的 Shutdown 不收 ctx。故服务把 app 的
-// stop_timeout 配成小于 8s 时，pkg/app 会先放弃等待、进程随后退出，在途任务被硬
-// 中断（asynq 侧会把它们放回队列重试，不丢任务，但会多一次重复投递）。要压低整体
-// 停机预算就把 stop_timeout 留在 8s 以上。
+// 注意本方法的等待时长由 Config.ShutdownTimeout 决定（零值即 asynq 默认 8s），
+// 与传入的 ctx 无关——asynq 的 Shutdown 不收 ctx。
+//
+// 这段时间从 app 的 stop_timeout 预算里扣，而 worker 按「基础组件在前、业务组件
+// 在后」的注册顺序通常最先停：配成 8s 而 stop_timeout 只有 10s 的话，传输层实际
+// 只剩 2s 排空。pkg/app 按剩余组件数均分预算，不会让 worker 把总额吃光，但
+// worker 自己这一段仍是实打实的——两个值要一起定。
 func (w *Worker) Stop(context.Context) error {
 	w.srv.Shutdown()
 	return nil

@@ -4,12 +4,19 @@
 /bin/
 
 # 本地会话产物：报告、备份等一律不入库。
-# 例外是接入各 AI 工具的薄适配器：.claude/skills/ 下是指向 .agents/skills/ 的
-# 符号链接——技能内容工具无关地留在 .agents/，Claude Code 靠这层链接才发现得到。
+# 例外有两类，都要入库：
+#  1. 接入各 AI 工具的薄适配器：.claude/skills/ 下是指向 .agents/skills/ 的符号
+#     链接——技能内容工具无关地留在 .agents/，Claude Code 靠这层链接才发现得到。
+#  2. openspec init 生成的 opsx 斜杠命令与技能。它们是**生成物**，由 openspec
+#     update 维护、不手改，所以不进 .agents/（挪了结构下次 update 就覆盖回去，
+#     而跟不上格式演进的那份会在归档时静默写坏活文档）。不入库的话克隆下来没有
+#     /opsx:* 命令，而动线第 2、6 步正是它们。
 /.claude/*
 !/.claude/settings.json
 !/.claude/skills
 !/.claude/skills/**
+!/.claude/commands
+!/.claude/commands/**
 
 .idea
 

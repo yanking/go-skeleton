@@ -1,0 +1,73 @@
+schema: spec-driven
+
+# context 被每个 opsx 技能在动手前读取（propose/explore 的技能里明写「apply that
+# field before exploring the codebase or making planning decisions」），所以本仓
+# 不可推翻的约束写在这里，而不是指望每次对话里有人想起来说。只放「读代码推不
+# 出来」的东西。
+#
+# 注意：这个文件解析失败时 openspec 只打一行 warning 就**忽略整份 context**
+# （失败开放）。所以凡是正文里带「冒号 + 空格」的条目都要用 `|` 块标量写——
+# 不然 YAML 会把它当成隐式键，而这里一错，所有生成的 proposal / spec / tasks
+# 都少了本仓的约束，且没有任何东西会报错。改完跑 `openspec context --json`
+# 确认没有 warning。
+context: |
+  本仓是 Go 微服务 monorepo 的**模板仓库**。一切改动都要经得起一个问题——
+  「这个模式复制到第 10 个服务时还成立吗」。完整约束见 CONSTITUTION.md
+  （仓库最高约束，与其冲突的一律以它为准）与 AGENTS.md。
+
+  不可推翻的几条：
+  - 提交门槛是 `make check` 全绿（build / vet / test + gofmt 零漂移）。
+  - error 逐层上抛：禁止吞错、禁止只打日志不返回、禁止业务路径 panic；
+    panic 只允许在装配期（起不来就该死）。
+  - 业务错误用 `errcode.Code`，翻译底层错误必须 `errcode.Wrap(cause, ec)`；
+    原始错误只进日志，绝不进给客户端的消息。
+  - `pkg/` 下不允许出现任何业务概念；通用错误码只占 10000–19999 分段。
+  - 服务运行时配置只来自 `configs/*.yaml`；凭证在 yaml 里只能写环境变量引用，
+    由部署侧注入（判据由 test/secrets 强制）。
+  - 包的使用文档只有包注释一处，不另立 README；用 `go doc ./pkg/<包>` 取。
+  - 分支：模板层改动先落 `main`，再 `git merge main` 带进 `example`；反方向
+    只能 cherry-pick（merge example 会把业务层也带过去）。
+  - 改了被 CONSTITUTION.md / AGENTS.md / .agents/ 描述的行为，同一次改动里
+    更新对应文档。
+
+rules:
+  tasks:
+    - |
+      tasks.md 用 superpowers 的 implementation plan 格式，**不要**用 `## N.`
+      编号组：任务标题写三级的 `### Task N` 加名字，任务下给 `**Files:**`
+      （Create / Modify / Test 的确切路径）与 `**Interfaces:**`（Consumes /
+      Produces 的确切签名）两块，步骤写 `- [ ] **Step M**` 加步骤名。
+    - |
+      上一条的理由是「格式由严格的一侧决定」：执行阶段的
+      superpowers:subagent-driven-development 用 awk 匹配 `^#+[ \t]+Task[ \t]+N`
+      抽取单个任务，那是真解析器；而 OpenSpec 的编号校验只对 `## N.` 组生效、
+      按设计跳过这种文件（宽容的一侧）。
+    - |
+      每个任务的步骤里要有可执行的验证命令与期望输出（如
+      `go test ./pkg/x -run TestY -v` 配 Expected FAIL），最后一步是提交。
+    - |
+      文件头的 `**Spec:**` 字段填本 change 目录 `openspec/changes/<name>/`：
+      proposal 与 specs delta 合起来才是权威，执行者两样都要读。
+
+  proposal:
+    - |
+      说明为什么、改什么、影响哪些 spec 与哪些代码路径。模板层的改动要写明它
+      在第 10 个服务上的表现，而不只是在当前这一个上成立。
+
+operations:
+  apply:
+    guidance:
+      - |
+        本仓**不用** `/opsx:apply` 执行。计划就绪后交给
+        superpowers:subagent-driven-development（逐任务新上下文 + 逐任务评审 +
+        五轮修复断路器），收口用 superpowers:requesting-code-review 与
+        superpowers:verification-before-completion，门槛是 `make check` 全绿。
+      - |
+        换人而不是两边都跑，是因为执行是 OpenSpec 整条链上唯一明显薄的一环
+        （apply 只是走任务、打勾），而那几条纪律是 superpowers 独有的。
+  archive:
+    guidance:
+      - |
+        归档前确认 delta 的 ADDED / MODIFIED / REMOVED 分类对得上当前
+        `openspec/specs/`：合并是机械的（追加 / 按需求标题替换 / 删除），
+        分类错了活文档里会出现两条互相矛盾的需求，而且不报错。

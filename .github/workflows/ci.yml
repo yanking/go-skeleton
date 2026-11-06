@@ -70,3 +70,23 @@ jobs:
             go.sum
             tools/go.sum
       - run: make vuln
+
+  # spec 校验不并进 check：openspec 是 Node 工具，而提交门槛要快、要零外部依赖
+  # （宪法第 5 条）。spec 格式漂移的失效模式是「归档会把活文档写坏」，不是
+  # 「代码跑不了」，CI 拦住就够。
+  #
+  # 版本钉住且与本机一致（同 tools/go.mod 对 Go 工具链的做法）：浮动版本会让同
+  # 一份 spec 在不同时间得出不同结论，而那正是 CI 不该有的性质。升级是一次显式
+  # 改动——`openspec install` 升本机，同一次提交里把下面这个版本号一起改。
+  spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g @fission-ai/openspec@1.14.3
+      # --all 才会把 specs 与 changes 都纳入；不带它在空仓下是 "Nothing to
+      # validate"，有东西了也只校验交互式选中的那一项。空仓退出 0，所以这个 job
+      # 从第一天起就是绿的；有坏 spec 时退出 1（实测：无场景的 ADDED 需求即红）。
+      - run: openspec validate --all --strict

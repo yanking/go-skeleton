@@ -35,7 +35,9 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `docs/<svc>/` | 服务的业务文档:架构、时序、接入指南;`diagrams/` 是 archify 渲染页 |
 | `docs/deploy.md` | 部署参考:探针语义、宽限期预算、退出码、资源限制、凭证注入 |
 | `docs/toolbox.md` | 仓库级工具参考(make 目标之外的工具,如 archify 画图) |
-| `docs/superpowers/{specs,plans}/` | 按日期归档的技术方案与实施计划 |
+| `openspec/specs/<能力>/spec.md` | **当前需求真相**:系统该做什么,随归档累积更新 |
+| `openspec/changes/<name>/` | 在办变更:proposal(为什么)/design(怎么做)/specs 的 delta/tasks(计划) |
+| `openspec/changes/archive/` | 已完成变更的原始记录:查「当初为什么这么定」看这里 |
 
 ## 公共包地图(`pkg/`)
 
@@ -146,10 +148,55 @@ new-service 技能还没有直连 REST 变体,入口照 rpc 变体的骨架把 `
 
 数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底;提取时会剥掉 `statement_timeout`——服务配置里它是 10s 量级,而大表的 `CREATE INDEX`、回填动辄几分钟,带着它跑会被库端中断在半途),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 
+## 变更动线(spec 先行,任何改动都走)
+
+OpenSpec 管「是什么、为什么、最后留下什么」,superpowers 管「怎么造出来」——
+两者各有一半是对方完全没有的,分工线就划在这里。下面「服务开发流程」是这条动线
+在「新加一个服务」这个场景上的特例。
+
+| 阶段 | 谁驱动 | 产物 |
+|---|---|---|
+| 1 问清 | `superpowers:brainstorming` | 一份交接文档(scratchpad,**不入库**) |
+| 2 立项 | `/opsx:propose <name>` | `openspec/changes/<name>/`:proposal + design + specs delta + tasks |
+| 3 排计划 | `superpowers:writing-plans` | 覆写 `changes/<name>/tasks.md`(propose 那份是草稿) |
+| 4 执行 | `superpowers:subagent-driven-development` | 代码 + 逐任务提交 |
+| 5 收口 | `requesting-code-review` + `verification-before-completion` | **`make check` 全绿**(宪法第 5 条) |
+| 6 归档 | `/opsx:archive <name>` | delta 合进 `openspec/specs/`,change 移入 `archive/<日期>-<name>/` |
+
+几条判据不能省:
+
+- **第 2 步不能由 brainstorming 直接写 delta**:ADDED / MODIFIED / REMOVED 的分类
+  要读当前 `openspec/specs/` 才定得了,而归档是机械合并(ADDED 追加、MODIFIED 按
+  需求标题替换、REMOVED 删除)。分类错了活文档里就出现两条互相矛盾的需求,**不报错**。
+  brainstorming 不认识 openspec,会把一切写成 ADDED。它的价值是提问纪律,不是生成。
+- **第 1 步那份文档不入库**:内容进了 proposal.md 与 design.md,留着就是第二处真源
+  (同 go-style「包的使用文档只有包注释这一处」)。它存在的理由只是跨上下文压缩——
+  brainstorming 是长对话,压缩后 `/opsx:propose` 读到的会是摘要。
+- **`/opsx:apply` 不用**,执行换给 superpowers。这条写在
+  `openspec/config.yaml` 的 `operations.apply.guidance`,不靠人记得。
+- **tasks.md 用 superpowers 的 plan 格式**,判据在 `openspec/config.yaml` 的
+  `rules.tasks`。两边都接受:`task-brief` 用 awk 匹配 `^#+[ \t]+Task[ \t]+N` 抽单个
+  任务(严格解析器),而 OpenSpec 的编号校验只对 `## N.` 组生效、按设计跳过它(宽容)。
+  格式由严格的一侧决定。
+- **改到「代码里已有、specs 里还没有」的行为时,delta 要把既有行为一并写成 ADDED**,
+  不能只写增量——否则活文档只记得住 diff,读起来像其余部分不存在。本仓的
+  `openspec/specs/` 从空开始,所以头几个 change 都会撞上这条。
+
+`openspec validate --all --strict` 不进 `make check`,占 CI 一个 job:它要 Node 工具链,
+而提交门槛要快、要零外部依赖;spec 格式漂移不是「代码跑不了」。`--all` 不能省——
+不带它在空仓下只报 "Nothing to validate"。openspec 的版本钉在 CI 里、与本机一致,
+升级要 `openspec install` 与改那个版本号同一次做。
+
+`.claude/commands/opsx/` 与 `.claude/skills/openspec-*/` 是 `openspec init` 的生成物,
+由 `openspec update` 维护、**不手改**,因此不进 `.agents/skills/`(那里放我们自己写的、
+工具无关的技能)。
+
 ## 服务开发流程(从零加一个服务的动线)
 
 一个服务的产品落点(以 `<svc>` 代称):`api/<svc>/` proto 契约(`make proto` 生成到 `gen/` 的 pb、stub、gateway 转译与 OpenAPI spec)/ `cmd/<svc>/` 入口(`main.go` + `initial/` 装配)/ `configs/<svc>.yaml` 声明式配置 / `internal/<svc>/` 业务分层(平铺或分模块,见上节)/ `migrations/<svc>/` goose 迁移(有库才有)。
 
+0. **先立 spec**:按上节「变更动线」走到第 2 步,新服务的需求与错误码分段先落进
+   `openspec/changes/<name>/`,再动代码。
 1. **渲染入口**:先按「服务分层」定布局,再用 `.agents/skills/new-service` 技能按变体(none/rpc/both)生成骨架与配置——分模块的服务给出首个模块名;随后按其清单登记错误码分段。已分模块的服务加业务域用 `.agents/skills/new-module`。
 2. **契约先行**:在 `api/<svc>/` 写 proto,要 HTTP 出口就加 `google.api.http` 注解;注释格式按 `.agents/go-style.md`「proto 注释」(直接决定文档页的标题与字段说明),`make proto` 生成全部产物。
 3. **分层实现**:按 model → repo → service → handler 的顺序写;各层职责见「服务分层」,错误流向见「错误处理约定」。**每层先在自己包里声明它需要的下层接口,再写实现**(「跳层依赖一律经接口」)。分模块的服务逐个模块写,跨模块调用守「服务分层」的模块边界。

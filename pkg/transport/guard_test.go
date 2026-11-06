@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -337,4 +338,39 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestGRPCMaxRecvSizeUnlimited 钉住「不限制」在 gRPC 侧的翻译。
+//
+// 两边对 0 的解读相反：HTTP 的 limitBody 把 ≤0 当不限制，而 grpc-go 的
+// MaxRecvMsgSize(0) 是 0 字节。直接复用同一个值的话，配了 max_request_bytes: -1
+// 的服务会把 gRPC 端口上所有非空请求拒掉——这正是本仓反复出现的「零值恰好等于
+// 另一个合法值」。
+func TestGRPCMaxRecvSizeUnlimited(t *testing.T) {
+	if got := grpcMaxRecvSize(Config{MaxRequestBytes: -1}); got != math.MaxInt32 {
+		t.Errorf("负值（不限制）应翻成 MaxInt32，got %d", got)
+	}
+	if got := grpcMaxRecvSize(Config{}); got != int(defaultMaxRequestBytes) {
+		t.Errorf("零值应取缺省 %d，got %d", defaultMaxRequestBytes, got)
+	}
+	if got := grpcMaxRecvSize(Config{MaxRequestBytes: 1024}); got != 1024 {
+		t.Errorf("显式值应原样，got %d", got)
+	}
+}
+
+// TestGRPCUnlimitedBodyAccepted 端到端验一次：配了不限制之后，gRPC 端口上的
+// 普通请求不该被拒。
+func TestGRPCUnlimitedBodyAccepted(t *testing.T) {
+	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0", MaxRequestBytes: -1, DrainDelay: -1},
+		WithService(registerEcho))
+	served := start(t, srv)
+
+	out := &grpc_health_v1.HealthCheckResponse{}
+	err := dial(t, srv).Invoke(context.Background(), echoPing,
+		&grpc_health_v1.HealthCheckRequest{Service: "probe"}, out)
+	if err != nil {
+		t.Errorf("配了不限制后普通请求不该被拒, got %v", err)
+	}
+
+	stop(t, srv, served)
 }

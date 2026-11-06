@@ -49,10 +49,12 @@ var skipDirs = map[string]bool{
 // 词仍不会命中（pass 后面紧跟字母）。
 var credentialKey = regexp.MustCompile(`(?i)(^|[^a-z0-9])(pass(word|wd)?|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|credential)([^a-z0-9]|$)`)
 
-// dsnCredential 匹配 URL 形态连接串里的明文口令：scheme://user:pass@host。
-// 这类值的键名是 write / read / addr / url，凭证藏在值里，键名规则看不见它——
-// 而 pkg/mysql、pkg/pgsql 的 DSN 字段正是这个形态。
-var dsnCredential = regexp.MustCompile(`://[^:/@\s]+:([^@/\s]+)@`)
+// dsnCredential 匹配连接串里内嵌的明文口令，两种形态都要认：
+//   - URL 形态 scheme://user:pass@host（pgsql、redis、下游地址）
+//   - mysql 形态 user:pass@tcp(host:port)/db —— 它没有 scheme，只看 :// 会漏掉
+//
+// 这类值的键名是 write / read / addr / url，凭证藏在值里，键名规则看不见它。
+var dsnCredential = regexp.MustCompile(`([^:/@\s"']+):([^@/\s"']+)@(?:tcp\()?[^\s"']`)
 
 // envRef 合法的环境变量引用，与 pkg/conf 的文法一致（只认 ${NAME}）。
 var envRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
@@ -189,22 +191,20 @@ func violation(line string) (string, bool) {
 		return "", false
 	}
 
-	key, rawValue, ok := splitAssignment(trimmed)
-	if !ok {
-		return "", false
-	}
-	value := cleanValue(rawValue)
-
-	// 先查 URL 形态连接串里内嵌的口令：它与键名无关。
-	if m := dsnCredential.FindStringSubmatch(value); m != nil {
-		if secret := m[1]; !placeholder.MatchString(secret) && !envRef.MatchString(secret) {
+	// 连接串里内嵌的口令与键名无关，且要对**整行**跑：splitAssignment 在值里的
+	// 第一个分隔符处切断，而 "postgres://…" 的第一个 : 正好在 scheme 后面，
+	// 切完就认不出来了；yaml 的列表项（- "postgres://…"）更是没有 k=v 结构。
+	if m := dsnCredential.FindStringSubmatch(trimmed); m != nil {
+		if secret := m[2]; !placeholder.MatchString(secret) && !envRef.MatchString(secret) {
 			return "连接串里内嵌了明文口令", true
 		}
 	}
 
-	if !credentialKey.MatchString(key) {
+	key, rawValue, ok := splitAssignment(trimmed)
+	if !ok || !credentialKey.MatchString(key) {
 		return "", false
 	}
+	value := cleanValue(rawValue)
 	if value == "" || placeholder.MatchString(value) || envRef.MatchString(value) {
 		return "", false
 	}
@@ -270,7 +270,13 @@ func TestViolation(t *testing.T) {
 		{name: "不是凭证类键名", line: `  addr: "127.0.0.1:6379"`, want: false},
 		{name: "DSN 口令是引用即放过", line: `  write: "postgres://app:${DB_PASSWORD}@db:5432/app"`, want: false},
 		{name: "DSN 无口令段", line: `  write: "postgres://app@db:5432/app"`, want: false},
-		{name: "mysql DSN 形态不带 scheme 不误报", line: `  write: "app@tcp(db:3306)/app?parseTime=true"`, want: false},
+		{name: "mysql DSN 无口令段不误报", line: `  write: "app@tcp(db:3306)/app?parseTime=true"`, want: false},
+		// 以下三条是此前盲掉的形态，各对应本仓配置里真实存在的写法。
+		{name: "mysql DSN 内嵌口令", line: `  write: "app:hunter2@tcp(db:3306)/app?parseTime=true"`, want: true},
+		{name: "yaml 列表项里的 DSN", line: `    - "postgres://app:hunter2@replica:5432/app?sslmode=disable"`, want: true},
+		{name: "mysql DSN 口令是引用即放过", line: `  write: "app:${DB_PASSWORD}@tcp(db:3306)/app"`, want: false},
+		{name: "邮箱不误报", line: `  email: "ops@example.invalid"`, want: false},
+		{name: "地址端口不误报", line: `  addr: "127.0.0.1:6379"`, want: false},
 		{name: "键名含 pass 但不是单词", line: `  passthrough: true`, want: false},
 		{name: "行尾注释不算值", line: `  password: "${P}" # 由部署侧注入`, want: false},
 	}

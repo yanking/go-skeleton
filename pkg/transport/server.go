@@ -79,6 +79,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -123,6 +125,11 @@ const (
 	// math.MaxUint32 即不限，单个客户端一条连接开数万流就是数万 goroutine
 	// 加解码缓冲；且不设时服务端连 SETTINGS_MAX_CONCURRENT_STREAMS 都不发，
 	// 客户端侧也无从自律。
+	//
+	// 环回双端口形态下这个值还有一层耦合要知道：全部 HTTP 流量共用一条环回
+	// ClientConn，于是 HTTP 端口的在途并发也被它顶住——超出的请求在客户端侧
+	// 排队，表现为延迟上升而不是报错。高 QPS 的 HTTP 出口要么调大它
+	// （WithGRPCServerOption 传 grpc.MaxConcurrentStreams），要么改用直连 REST 形态。
 	defaultMaxConcurrentStreams = 256
 	// defaultMaxConnectionIdle 闲置连接回收时长，与 HTTP 侧的 IdleTimeout 同值、
 	// 同理由（fd 不被闲置连接占住）。gRPC 是长连接协议，这条比 HTTP 侧更有必要。
@@ -143,6 +150,11 @@ const (
 // 就是关 listener。这段窗口里到达的新连接拿到的是 TCP 层的 connection refused
 // （不是 503），客户端的重试策略往往不覆盖它——每次滚动更新都会丢一批请求，
 // 而且表现为客户端侧的连接错误，很难归因到发布。
+//
+// 这段等待发生在本组件的 Stop 里，所以它**包含在** app 的 stop_timeout 之内，
+// 不是额外的一段：stop_timeout 要装得下 drain_delay + handler_timeout + 余量
+// （默认 5 + 15 + 5 = 25s）。pkg/app 的预算分配按「保留制」给最先停的组件几乎
+// 全部额度，正是为了让这三个值能这样对上（见 app.budgetFor）。
 const defaultDrainDelay = 5 * time.Second
 
 // 请求体与处理耗时的默认上限，可经 Config 覆盖。
@@ -154,7 +166,16 @@ const (
 	// defaultHandlerTimeout 单次 unary 请求的处理超时。客户端不传 deadline 时，
 	// 没有它 handler 可以一直跑下去：下游卡住时请求无限堆积，没有自然泄压点。
 	// 只作用于 unary——流式方法天然长连接，给它设硬上限就是按秒切流。
-	defaultHandlerTimeout = 30 * time.Second
+	//
+	// 它不是硬上限：只给 ctx 设 deadline，不看 ctx 的 handler 照样跑完，那次请求的
+	// 访问日志也照样记 OK。能被它掐断的是守着 ctx 的下游调用（本仓的 DB、Redis、
+	// 出站 HTTP 都守），所以「ctx 一路传下去」这条纪律才是它生效的前提。
+	//
+	// 取值与停机预算是一组：停机要等在途请求做完，所以
+	// app 的 stop_timeout 必须装得下 defaultDrainDelay + 本值 + 余量
+	// （默认 5 + 15 + 5 = 25s）。本值配得比 stop_timeout 还大的话，
+	// TERM 前一刻放进来的请求合法地可以跑过整个停机预算，优雅排空就无从保证。
+	defaultHandlerTimeout = 15 * time.Second
 )
 
 // Config 传输装配参数，三种构造器共用，字段按形态必填或必空（见各构造器）。
@@ -178,8 +199,10 @@ type Config struct {
 	// 流式方法不受此限：长连接是它的常态。
 	HandlerTimeout time.Duration `yaml:"handler_timeout"`
 	// DrainDelay 摘流等待，零值取 defaultDrainDelay，负值即不等（本地开发、
-	// 单实例部署，或摘流由 preStop 钩子负责时）。须算进部署侧的宽限期预算：
-	// 它与 app 的 stop_timeout 是串行相加的两段。
+	// 单实例部署，或摘流由 preStop 钩子负责时）。
+	//
+	// 它发生在本组件的 Stop 里，因此是**包含在** app 的 stop_timeout 之内的，
+	// 不是额外的一段——配得接近 stop_timeout 就没有时间排空在途请求了。
 	DrainDelay time.Duration `yaml:"drain_delay"`
 	// Reflection 是否开启 gRPC reflection（grpcurl 等工具靠它发现服务与字段结构）。
 	//
@@ -213,6 +236,19 @@ func (c Config) maxRequestBytes() int64 {
 	}
 }
 
+// grpcMaxRecvSize 把请求体上限翻成 grpc-go 的收包上限。
+//
+// 两边对 0 的解读正好相反：HTTP 侧 limitBody 把 ≤0 当「不限制」，而 grpc-go 里
+// MaxRecvMsgSize(0) 就是 0 字节——它的「不限」是 math.MaxInt32。直接复用同一个
+// 返回值的话，配了 max_request_bytes: -1（文档承诺的「不限制」）的服务会把 gRPC
+// 端口上所有非空请求拒掉，报 received message larger than max (N vs. 0)。
+func grpcMaxRecvSize(cfg Config) int {
+	if limit := cfg.maxRequestBytes(); limit > 0 {
+		return int(limit)
+	}
+	return math.MaxInt32
+}
+
 // handlerTimeout 取生效的处理超时，0 即不限制。
 func (c Config) handlerTimeout() time.Duration {
 	switch {
@@ -235,8 +271,15 @@ type Server struct {
 	health *health.Server
 	// serving 就绪状态位，/readyz 与 gRPC health 共用同一个事实来源。
 	serving atomic.Bool
+	// started 是否已进入 Start。Stop 据此决定要不要摘流：别的组件装配失败触发
+	// 全量停机时，本组件还没接过一个请求，白等 drain_delay 没有意义。
+	started atomic.Bool
 	// readiness 依赖就绪检查，由服务经 WithReadinessCheck 注入。
 	readiness []ReadinessCheck
+	// logger 就绪状态翻转的日志出口，未注入 WithLogger 时为 nil。
+	logger *slog.Logger
+	// lastReady 上次就绪判定的结果，用于只在状态翻转时记日志。
+	lastReady atomic.Bool
 	// drainDelayValue 摘流等待时长，见 Config.DrainDelay。
 	drainDelayValue time.Duration
 
@@ -311,8 +354,9 @@ func NewRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 
 // newServer 建一个就绪状态为「服务中」的 Server 骨架。
 func newServer(cfg Config, o *options) *Server {
-	s := &Server{readiness: o.readiness, drainDelayValue: cfg.drainDelay()}
+	s := &Server{readiness: o.readiness, drainDelayValue: cfg.drainDelay(), logger: o.logger}
 	s.serving.Store(true)
+	s.lastReady.Store(true)
 	return s
 }
 
@@ -392,7 +436,7 @@ func newGRPCServer(cfg Config, o *options, s *Server) *grpc.Server {
 	}
 	// 资源上限：grpc-go 的默认值是「单连接流数不限、连接永不回收」，理由见各常量。
 	opts = append(opts,
-		grpc.MaxRecvMsgSize(int(cfg.maxRequestBytes())),
+		grpc.MaxRecvMsgSize(grpcMaxRecvSize(cfg)),
 		grpc.MaxConcurrentStreams(defaultMaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle:     defaultMaxConnectionIdle,
@@ -495,6 +539,12 @@ func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
 		handler = otelhttp.NewHandler(handler, "http",
 			otelhttp.WithTracerProvider(o.tracerProvider),
 			otelhttp.WithPropagators(tracePropagators),
+			// 探针不埋 span、不计指标：默认全采样下每 pod 每分钟十几条探针 span
+			// 常驻，而摘流期 /readyz 的 503 会被 otelhttp 计进 http.server.* 的
+			// 错误率——每次滚动更新都往 SLI 里灌一批 5xx。
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+			}),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}))
@@ -553,6 +603,12 @@ func (s *Server) attachDirectHTTP(ctx context.Context, cfg Config, o *options) {
 	if o.tracerProvider != nil || o.meterProvider != nil {
 		otelOpts := []otelhttp.Option{
 			otelhttp.WithPropagators(tracePropagators),
+			// 探针不埋 span、不计指标：默认全采样下每 pod 每分钟十几条探针 span
+			// 常驻，而摘流期 /readyz 的 503 会被 otelhttp 计进 http.server.* 的
+			// 错误率——每次滚动更新都往 SLI 里灌一批 5xx。
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+			}),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}),
@@ -620,10 +676,13 @@ func (s *Server) mountMux(gwMux http.Handler, mounts []mount) *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.ready(r.Context()); err != nil {
-			// 原因只进响应体不进日志级别：探针每隔几秒打一次，失败时
-			// 刷日志会把真正的故障信息挤掉。
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		err := s.ready(r.Context())
+		s.logReadinessFlip(r.Context(), err)
+		if err != nil {
+			// 原因只进日志，不进响应体：这个端点免鉴权，而依赖检查的错误文本会
+			// 带连接串细节（pgx 的失败信息里有 user、database、host）——
+			// 宪法第 2 条，原始错误绝不进给客户端的消息。
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -643,6 +702,7 @@ func (s *Server) Name() string { return "transport" }
 // Start 实现 app.Component：阻塞服务，直到 Stop 或某一路出错。
 // 停机期各 Serve 的正常收尾由 closedOnStop 过滤，不上报给 app。
 func (s *Server) Start(context.Context) error {
+	s.started.Store(true)
 	switch {
 	case s.grpc == nil: // 直连 REST 形态：只有 HTTP 一路
 		return closedOnStop(s.http.Serve(s.httpLn))
@@ -671,7 +731,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	// 等编排系统把本实例从负载均衡摘掉，再关监听。顺序反了就是「收到 TERM
 	// 的瞬间拒连」，详见 defaultDrainDelay 的注释。
 	s.markNotServing()
-	if delay := s.drainDelayValue; delay > 0 {
+	// 没跑起来就不等：装配失败触发的全量停机里，本组件一个请求都没接过。
+	if delay := s.drainDelayValue; delay > 0 && s.started.Load() {
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
@@ -711,6 +772,23 @@ func (s *Server) markNotServing() {
 		// Shutdown 把全部已注册服务（含空名的整体状态）置为 NOT_SERVING。
 		s.health.Shutdown()
 	}
+}
+
+// logReadinessFlip 只在就绪状态翻转时记一条。
+//
+// 探针每隔几秒打一次，失败时每次都记会把真正的故障信息挤出日志；但「什么时候
+// 开始不就绪、什么时候恢复」必须看得到——否则依赖不可达这个事件在日志平台里
+// 一点痕迹都没有，运维只能靠手动 curl 探针才知道原因。
+func (s *Server) logReadinessFlip(ctx context.Context, err error) {
+	ready := err == nil
+	if s.lastReady.Swap(ready) == ready || s.logger == nil {
+		return
+	}
+	if ready {
+		s.logger.InfoContext(ctx, "就绪检查恢复")
+		return
+	}
+	s.logger.WarnContext(ctx, "就绪检查失败", "err", err)
 }
 
 // ready 跑就绪判定：先看状态位，再跑注入的依赖检查。

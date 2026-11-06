@@ -8,8 +8,9 @@ log:
   format: json
 
 app:
-  # 停机总超时，按剩余组件数均分。它与 transport.drain_delay 是串行相加的两段，
-  # 两段之和要装进部署侧的宽限期（K8s 默认 30s 装不下 5s + 25s，见 docs/deploy.md）。
+  # 停机总超时。transport 的 drain_delay 与在途请求排空都在这个预算之内，
+  # 所以它要装得下 drain_delay + handler_timeout + 余量（默认 5 + 15 + 5）。
+  # 部署侧的宽限期再比它大几秒，见 docs/deploy.md。
   stop_timeout: 25s
 
 telemetry:
@@ -26,21 +27,25 @@ telemetry:
 
 # 用到 PostgreSQL 时放开。DSN 的两个超时是硬要求（装配期校验）：零值即无限等待，
 # 网络分区且对端不发 RST 时，请求 goroutine 会连着连接一起卡到进程重启。
+#
+# 下面的凭证占位用的是**单美元符号**写法（$DB_PASSWORD）。pkg/conf 的展开是解析前的
+# 纯文本替换、不认注释，带花括号的引用即使写在注释里也会被展开、未设置就 panic——
+# 放开这些行时记得把 $NAME 改成带花括号的形式。
 # pgsql:
-#   write: "postgres://app:${DB_PASSWORD}@127.0.0.1:5432/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
+#   write: "postgres://app:$DB_PASSWORD@127.0.0.1:5432/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
 #   read: # 副本，可空；空则全部语句走主库
-#     - "postgres://app:${DB_PASSWORD}@127.0.0.1:5433/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
+#     - "postgres://app:$DB_PASSWORD@127.0.0.1:5433/app?sslmode=disable&connect_timeout=5&statement_timeout=10000"
 #   max_open_conns: 20 # 库侧 max_connections 是全局资源，按 (库上限 - 预留) / (服务数 × 副本数) 调
 #
 # MySQL 版的硬要求多一项 parseTime=true：
 # mysql:
-#   write: "app:${DB_PASSWORD}@tcp(127.0.0.1:3306)/app?parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
+#   write: "app:$DB_PASSWORD@tcp(127.0.0.1:3306)/app?parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
 
 # 用到 Redis 时放开。多地址必须显式声明 mode——按地址数推断会把两个独立的单机
 # 地址当成集群，而且不报错，只是键全落在其中一个节点上，重启换人即丢。
 # redis:
 #   addrs: ["127.0.0.1:6379"]
-#   password: "${REDIS_PASSWORD}"
+#   password: "$REDIS_PASSWORD"
 #   mode: standalone # auto（仅单地址）/ standalone / cluster
 #   tls: false       # 托管 Redis 常强制加密传输，不开就连不上
 
@@ -48,6 +53,6 @@ telemetry:
 # 理由见 pkg/queue 包注释。
 # queue:
 #   addr: "127.0.0.1:6379"
-#   password: "${REDIS_PASSWORD}"
+#   password: "$REDIS_PASSWORD"
 #   concurrency: 10
 #   pool_size: 20 # 并发数远高于池大小会大面积撞 ErrPoolTimeout

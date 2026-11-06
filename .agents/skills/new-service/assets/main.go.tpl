@@ -52,7 +52,10 @@ func main() {
 
 	if err := initial.App(ctx, c, logger); err != nil {
 		stop()
-		if errors.Is(err, app.ErrStopTimeout) {
+		// 判定顺序要紧：App 返回的是 errors.Join(运行期错误, 停机错误)，两者可能
+		// 同时存在。先判停机超时的话，「组件崩了 + 另一个组件又停得慢」会被归成
+		// 「慢」而不告警——真崩溃就此静默。
+		if errors.Is(err, app.ErrStopTimeout) && !errors.Is(err, app.ErrRunFailure) {
 			logger.Warn("停机未在宽限期内完成", "err", err)
 			os.Exit(exitStopTimeout)
 		}

@@ -129,9 +129,10 @@ func WithDirectGateway(register DirectRegistrar) Option {
 	return func(o *options) { o.directGateways = append(o.directGateways, register) }
 }
 
-// WithMiddleware 追加自定义 HTTP 中间件，挂在内置链（访问日志 → 鉴权）之内、
-// handler 之外，按传入顺序由外到内执行，可重复调用以追加多个——位置与 gRPC 侧的
-// WithUnaryInterceptor 一致，故同一套横切关注点换形态时的相对次序不变。
+// WithMiddleware 追加自定义 HTTP 中间件，挂在内置链（处理超时 → 访问日志 →
+// panic 兜底 → 鉴权）之内、handler 之外，按传入顺序由外到内执行，可重复调用以
+// 追加多个——位置与 gRPC 侧的 WithUnaryInterceptor 一致，故同一套横切关注点
+// 换形态时的相对次序不变。
 //
 // 中间件由 ServeMux.Handle 在路由注册时挂上，只包住 gateway 路由：/healthz 与
 // WithMount 挂载点不经此，探针与文档页因此保持免鉴权。
@@ -151,8 +152,8 @@ func WithMount(pattern string, h http.Handler) Option {
 	return func(o *options) { o.mounts = append(o.mounts, mount{pattern: pattern, handler: h}) }
 }
 
-// WithUnaryInterceptor 追加自定义 Unary 拦截器，挂在内置链（出口翻译 → 访问日志 →
-// 鉴权）之内、handler 之外，按传入顺序执行。gRPC 拦截器随 gRPC 服务器存在，
+// WithUnaryInterceptor 追加自定义 Unary 拦截器，挂在内置链（出口翻译 → 处理超时 →
+// 访问日志 → panic 兜底 → 鉴权）之内、handler 之外，按传入顺序执行。gRPC 拦截器随 gRPC 服务器存在，
 // 故只有 NewRPCServer 与 NewRPCRESTServer 接受它。
 func WithUnaryInterceptor(interceptors ...grpc.UnaryServerInterceptor) Option {
 	return func(o *options) { o.unary = append(o.unary, interceptors...) }

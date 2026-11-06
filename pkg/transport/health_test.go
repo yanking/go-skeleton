@@ -7,13 +7,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc/health/grpc_health_v1"
+
+	"github.com/yanking/go-skeleton/pkg/app"
 )
 
 // probeStatus 打一个探针并返回状态码与响应体，不借用 get()——摘流窗口里的请求
@@ -59,8 +63,9 @@ func TestDrainBeforeClose(t *testing.T) {
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("摘流窗口内 /readyz got %d %q, want 503", code, body)
 	}
-	if !strings.Contains(body, "停机中") {
-		t.Errorf("/readyz 应说明原因, got %q", body)
+	// 响应体是固定文案：这个端点免鉴权，原因（可能带连接串细节）只进日志。
+	if strings.Contains(body, "停机中") {
+		t.Errorf("/readyz 的响应体不该带内部原因, got %q", body)
 	}
 	// liveness 仍绿：它转红会让编排系统强杀进程，而停机中的实例正需要时间排空。
 	if code, _ := probeStatus(t, base+"/healthz"); code != http.StatusOK {
@@ -111,13 +116,18 @@ func TestGRPCHealthFlipsOnDrain(t *testing.T) {
 // 另一半：不 ping 是因为 DB 比进程晚就绪是常态，但连不上库的实例不该接流量——
 // 没有这一环，那样的实例照样通过就绪探针，编排系统继续发流量，每个请求都 500。
 func TestReadinessChecks(t *testing.T) {
-	var broken atomic.Bool
+	const reason = "数据库不可达: user=app host=10.0.0.5"
+	var (
+		broken atomic.Bool
+		buf    safeBuffer
+	)
 	srv := NewRESTServer(context.Background(),
 		Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
+		WithLogger(slog.New(slog.NewJSONHandler(&buf, nil))),
 		WithDirectGateway(guardGateway),
 		WithReadinessCheck(func(context.Context) error {
 			if broken.Load() {
-				return errors.New("数据库不可达")
+				return errors.New(reason)
 			}
 			return nil
 		}))
@@ -133,8 +143,26 @@ func TestReadinessChecks(t *testing.T) {
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("检查失败时 /readyz got %d, want 503", code)
 	}
-	if !strings.Contains(body, "数据库不可达") {
-		t.Errorf("/readyz 应带上检查给出的原因, got %q", body)
+	// 原因只进日志：这个端点免鉴权，而依赖检查的错误文本会带连接串细节
+	// （user、host、database）——宪法第 2 条。
+	if strings.Contains(body, "10.0.0.5") || strings.Contains(body, "数据库不可达") {
+		t.Errorf("/readyz 的响应体泄漏了内部原因, got %q", body)
+	}
+	if !strings.Contains(buf.String(), reason) {
+		t.Errorf("原因应进日志, got %s", buf.String())
+	}
+	// 再探一次：状态没翻转，不该再记一条——探针每几秒一次，每次都记会把真正的
+	// 故障信息挤出日志。
+	before := strings.Count(buf.String(), "就绪检查失败")
+	probeStatus(t, base+"/readyz")
+	if after := strings.Count(buf.String(), "就绪检查失败"); after != before {
+		t.Errorf("状态未翻转不该重复记日志，got %d 条（之前 %d 条）", after, before)
+	}
+	// 恢复要记一条，否则「什么时候好的」看不出来。
+	broken.Store(false)
+	probeStatus(t, base+"/readyz")
+	if !strings.Contains(buf.String(), "就绪检查恢复") {
+		t.Errorf("恢复应记一条, got %s", buf.String())
 	}
 	// liveness 不查依赖：重启进程治不好一个挂掉的数据库。
 	if code, _ := probeStatus(t, base+"/healthz"); code != http.StatusOK {
@@ -176,5 +204,79 @@ func TestDrainDelayDefaults(t *testing.T) {
 	}
 	if got := (Config{DrainDelay: time.Second}).drainDelay(); got != time.Second {
 		t.Errorf("显式值 got %v, want 1s", got)
+	}
+}
+
+// fillerComponent 瞬间启停的占位组件，用来把服务凑到真实的组件规模。
+type fillerComponent struct{ name string }
+
+func (c fillerComponent) Name() string                { return c.name }
+func (c fillerComponent) Start(context.Context) error { return nil }
+func (c fillerComponent) Stop(context.Context) error  { return nil }
+
+// TestStopUnderDefaultBudget 端到端钉住**默认配置**下的停机：一个很普通的六组件
+// 服务，在途请求必须正常完成，而不是被摘流吃光预算后强制切断。
+//
+// 这条路径此前一条测试都没覆盖——摘流的几条用例全部显式关掉 drain_delay，而默认
+// 值才是生产上唯一会走的那条。预算按组件数均分时它必失败：transport 分到
+// 25s/6 ≈ 4.2s，连 5s 摘流都装不下，于是 Shutdown 拿到已过期的 ctx、在途请求被
+// 当场切断，而每次滚动更新都以「宽限期耗尽」的非零码收场。
+func TestStopUnderDefaultBudget(t *testing.T) {
+	inflight := make(chan struct{})
+	// 不配 DrainDelay、HandlerTimeout、StopTimeout：这条用例的全部意义就在默认值。
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+		WithDirectGateway(func(_ context.Context, mux *runtime.ServeMux) error {
+			return mux.HandlePath("GET", "/v1/work",
+				func(w http.ResponseWriter, _ *http.Request, _ map[string]string) {
+					close(inflight)
+					time.Sleep(time.Second) // 模拟在途业务
+					_, _ = io.WriteString(w, "completed")
+				})
+		}))
+
+	// 凑成一个很普通的服务规模：遥测 + DB + Redis + 队列客户端 + 队列 worker + 传输。
+	components := []app.Component{
+		fillerComponent{"telemetry"}, fillerComponent{"db"}, fillerComponent{"redis"},
+		fillerComponent{"queue-client"}, fillerComponent{"queue-worker"}, srv,
+	}
+	a := app.New(app.Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, components...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- a.Run(ctx) }()
+
+	body := make(chan string, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).
+			Get("http://" + srv.httpLn.Addr().String() + "/v1/work")
+		if err != nil {
+			body <- "请求失败: " + err.Error()
+			return
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		body <- string(raw)
+	}()
+
+	<-inflight // 请求已进 handler
+	cancel()   // 触发停机
+
+	select {
+	case got := <-body:
+		if got != "completed" {
+			t.Errorf("在途请求应正常完成，got %q", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("在途请求未在 30s 内完成")
+	}
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Errorf("默认配置下的停机应当干净（不该是宽限期耗尽），got %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run 未在 30s 内返回")
 	}
 }

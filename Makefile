@@ -106,7 +106,11 @@ proto-lint: tools ## buf lint + 破坏性变更检查(基线默认为当前分�
 # goose_db_version(本文件不传 -table,后果与改法见 AGENTS.md「服务分层」迁移段)。
 GOOSE       := $(TOOLS_DIR)/goose
 MIGRATE_DIR := migrations/$(SVC)
-MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null)
+# 提取后要剥掉 statement_timeout:服务配置里它是 10s 量级(防业务 SQL 跑飞),而大表的
+# CREATE INDEX、ALTER TABLE、数据回填动辄几分钟,带着它跑会被库端
+# "canceling statement due to statement timeout" 中断在半途——迁移做了一半最难收拾。
+# 两条 sed 分别处理「参数在中间」与「参数在末尾」两种位置。
+MIGRATE_DSN ?= $(shell sed -n '/^pgsql:/,/^[^[:space:]]/ s/^[[:space:]]*write:[[:space:]]*"\([^"]*\)".*/\1/p' configs/$(SVC).yaml 2>/dev/null | sed -E 's/statement_timeout=[0-9]+&//; s/[?&]statement_timeout=[0-9]+//')
 
 migrate-create: ## 新建迁移文件: make migrate-create SVC=<svc> NAME=create_xxx
 	@test -n "$(SVC)" || { echo ">> 无服务可迁移,先用 new-service 技能生成"; exit 1; }

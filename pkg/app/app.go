@@ -15,15 +15,27 @@ import (
 // 的默认值（30s）留 5s 余量：取等只是刚好用满，收尾日志、遥测 flush 与进程退出
 // 都还要时间，用满的那一刻 SIGKILL 同时到达，这些就全丢了。
 //
-// 注意传输组件的摘流等待（pkg/transport 的 drain_delay）是串在这之前的另一段，
-// 部署侧的宽限期要能装下两段之和。
+// 25s 这个数是算出来的，不是挑的：它要装得下传输组件的摘流（drain_delay 默认
+// 5s）加在途请求排空（handler_timeout 默认 15s）再加余量。改其中任何一个都要
+// 回头看另外两个。
+//
+// 传输组件的摘流等待（pkg/transport 的 drain_delay，默认 5s）发生在它自己的 Stop
+// 里，所以是**包含在本预算之内**的，不是额外的一段：本值要装得下
+// drain_delay + handler_timeout + 余量（默认 5 + 15 + 5 = 25）。
 const defaultStopTimeout = 25 * time.Second
 
-// ErrStopTimeout 停机未在宽限期内完成。
+// 两个哨兵让调用方（cmd）能区分停机的两种结局：一次干净但超时的停机和一次真
+// 崩溃，不该在退出码与告警上长得一模一样。
 //
-// 单独成哨兵是为了让调用方（cmd）能把它与「运行期组件意外退出」区分开：一次
-// 干净但超时的停机和一次真崩溃，不该在退出码与告警上长得一模一样。
-var ErrStopTimeout = errors.New("停机未在宽限期内完成")
+// Run 返回的是 errors.Join(runErr, stopErr)，两者可能同时存在（组件崩了、另一个
+// 组件又停得慢）。判定顺序因此要紧：先看 ErrRunFailure，否则「崩 + 慢」会被归成
+// 「慢」而不告警。
+var (
+	// ErrStopTimeout 停机未在宽限期内完成。
+	ErrStopTimeout = errors.New("停机未在宽限期内完成")
+	// ErrRunFailure 组件在运行期意外退出。
+	ErrRunFailure = errors.New("组件意外退出")
+)
 
 // Component 可被 App 编排的生命周期组件。
 //
@@ -54,8 +66,13 @@ type Component interface {
 type Config struct {
 	// StopTimeout 停机总超时，从开始逆序停止起算，零值取 defaultStopTimeout。
 	//
-	// 它是全部组件的总额，但按「剩余预算 / 剩余组件数」逐个分配，而不是先到先吃：
-	// 排在后面的组件不会因为前面某个卡住而一点时间都拿不到（理由见 budgetFor）。
+	// 它是全部组件的总额。分配不是均分、也不是先到先吃：每个组件拿到「剩余预算
+	// 减去后面组件的保底」，于是最先停的传输组件拿到几乎全部，而排在后面的 DB、
+	// Redis 各有保底不会拿到已过期的 ctx（理由见 budgetFor）。
+	//
+	// 它要装得下传输组件的摘流加排空，即 transport 的 drain_delay + handler_timeout
+	// 再加余量——默认值（5s + 15s + 5s = 25s）正是这么来的，改其中任何一个都要
+	// 回头看另外两个。
 	//
 	// 一处不精确要说明：每个组件至少拿 minStopBudget，所以总额在极端情况下会被
 	// 撑破——最坏超出是「组件数 × minStopBudget」（当前是每个 100ms，五个组件即
@@ -132,21 +149,27 @@ func (a *App) Run(ctx context.Context) error {
 // 收尾；但它也不能大，否则组件多的时候会把总预算撑破。
 const minStopBudget = 100 * time.Millisecond
 
-// budgetFor 给下一个要停的组件分配时间：剩余预算按剩余组件数均分，不低于
-// minStopBudget。
+// budgetFor 给下一个要停的组件分配时间：剩余预算减去「后面每个组件各留
+// minStopBudget」之后的全部，下限是 minStopBudget 本身。
 //
-// 原先全部组件共享一个总预算、先到先吃，后果是：传输层被慢 handler 挂住就把预算
-// 吃光，排在后面的 DB、Redis 拿到已过期的 ctx 立刻返回「超时」——而它们的 Stop
-// 其实只需要几毫秒。于是关库与仍在执行的 handler 重叠，handler 的下一条 SQL 撞上
-// sql: database is closed，事务做了一半；日志还把这些瞬间返回的组件一并报成
-// 「宽限期耗尽」，真正卡住的那一个反而看不出来。
+// 为什么是保留制而不是均分：各组件的时间需求根本不均。传输组件要先摘流、再等
+// 在途请求做完（量级是秒），而 DB、Redis 的 Stop 是关个池（毫秒级）。均分会让
+// 最先停的传输组件只拿到 T/n——六个组件、25s 预算下就是 4.2s，连摘流加排空都
+// 装不下，在途请求被 grpc.Stop() 当场切断，而每次停机都以「宽限期耗尽」收场。
+//
+// 保留制同时守住了均分本来要解决的那个问题：原先全部组件共享一个总预算、先到
+// 先吃，传输层被慢 handler 挂住就把预算吃光，排在后面的 DB、Redis 拿到已过期的
+// ctx 立刻返回「超时」——于是关库与仍在执行的 handler 重叠，handler 的下一条
+// SQL 撞上 sql: database is closed，事务做了一半。现在它们各自有保底。
 func (a *App) budgetFor(ctx context.Context, remaining int) time.Duration {
 	deadline, ok := ctx.Deadline()
 	if !ok || remaining <= 0 {
 		return a.stopTimeout
 	}
-	if share := time.Until(deadline) / time.Duration(remaining); share > minStopBudget {
-		return share
+	// 给排在后面的 remaining-1 个组件各留一份保底。
+	reserved := time.Duration(remaining-1) * minStopBudget
+	if budget := time.Until(deadline) - reserved; budget > minStopBudget {
+		return budget
 	}
 	return minStopBudget
 }
@@ -163,7 +186,7 @@ func (a *App) runComponent(ctx context.Context, c Component, fatal chan<- error)
 		a.logger.Debug("组件停机退出", "component", c.Name(), "err", err)
 	default:
 		a.logger.Error("组件意外退出", "component", c.Name(), "err", err)
-		fatal <- fmt.Errorf("运行组件 %s: %w", c.Name(), err)
+		fatal <- fmt.Errorf("运行组件 %s: %w: %w", c.Name(), ErrRunFailure, err)
 	}
 }
 

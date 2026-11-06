@@ -44,20 +44,27 @@ Go 版本由 Makefile 从 `go.mod` 提取后传入，不在 Dockerfile 里写死
 
 ## 宽限期预算（最容易配错的一处）
 
-停机是**串行相加**的两段，部署侧的宽限期要装得下两段之和再留余量：
+摘流是**包含在**停机预算之内的，不是额外的一段——它发生在传输组件的 Stop 里：
 
 ```
-terminationGracePeriodSeconds  ≥  drain_delay  +  stop_timeout  +  余量
-                                  （transport）   （app）         （收尾日志、遥测 flush、进程退出）
+terminationGracePeriodSeconds  ≥  stop_timeout  +  余量
+                                  └─ 其中传输组件要装下 drain_delay + handler_timeout
 ```
 
 | 参数 | 位置 | 默认 | 作用 |
 |---|---|---|---|
 | `transport.drain_delay` | `configs/<svc>.yaml` | 5s | 把就绪探针置红后等多久再关监听，给 LB 摘流留时间 |
-| `app.stop_timeout` | 同上 | 25s | 全部组件逆序停止的总预算，按剩余组件数均分 |
-| `terminationGracePeriodSeconds` | Pod spec | K8s 默认 30s | **不改的话会把上面两段挤爆**：5+25 已经用满 30s，收尾日志与遥测 flush 全丢 |
+| `transport.handler_timeout` | 同上 | 15s | 单次 unary 请求的处理上限，也就是停机最多要等多久才能排空 |
+| `app.stop_timeout` | 同上 | 25s | 全部组件停止的总预算 = 5 + 15 + 余量。改上面两个值就要回头改它 |
+| `terminationGracePeriodSeconds` | Pod spec | K8s 默认 30s | 用满 25s 没有余量，收尾日志与遥测 flush 会被 SIGKILL 截断 |
 
-按默认值配，宽限期至少给 **40s**。
+按默认值配，宽限期给 **35s**。
+
+预算在组件之间怎么分：不是均分。各组件的时间需求本来就不均——传输组件要摘流加
+排空（秒级），而 DB、Redis 的 Stop 是关个池（毫秒级）。`pkg/app` 因此按「保留制」
+分配：最先停的组件（注册顺序最后的，通常就是传输）拿到「总额减去后面组件的保底」，
+排在后面的各有 100ms 保底不会拿到已过期的 ctx。均分的话六组件、25s 预算下传输只
+拿到 4.2s，连摘流都装不下。
 
 **为什么需要 `drain_delay`**：收到 TERM 后立刻关监听，而 LB 与 kube-proxy 摘流依赖
 Endpoint 更新传播，需要数百毫秒到数秒。那段窗口里到达的新连接拿到的是 TCP 层的
@@ -75,7 +82,8 @@ lifecycle:
 ```
 
 骨架默认用 `drain_delay`（在进程内，不依赖基础镜像里有 shell）。用 `preStop` 的话把
-`drain_delay` 配成 `-1s`（不等）。
+`drain_delay` 配成 `-1s`（不等），并把那段时间加到宽限期里——`preStop` 的耗时是在
+容器收到 TERM **之前**，确实是额外的一段。
 
 ## 退出码
 
@@ -139,8 +147,12 @@ MIGRATE_DSN="postgres://..." make migrate-up SVC=<svc>
 |---|---|---|
 | `telemetry.exporter` | `stdout` | `otlp` + `endpoint`（如 `collector:4317`） |
 | `telemetry.sampler` | 默认（全采） | `parentbased_traceidratio` + `sample_ratio` |
-| `log.level` | `debug` | `info`（运行期可经 `LevelVar` 临时调，不必重启） |
+| `log.level` | `debug` | `info`（要支持运行期调级，见下） |
 | `log.format` | `text` 肉眼可读 | `json` |
+
+运行期调级：`pkg/log` 的 `Config.LevelVar` 是那个旋钮，入口模板已经把它接上，
+但**转动它的手要服务自己装**——一个管理端点、一个信号处理器，或者别的什么。
+骨架不替你选（宪法第 2 条：不加未要求的灵活性），只保证旋钮在那里、改了立刻生效。
 
 **生产必须改这两项**：`exporter` 留 `stdout` 会把全部 span 与 metric 以 JSON 打进
 标准输出（叠加默认的全采样，量按 QPS 线性涨，还会把真日志挤出采集配额）；
@@ -190,6 +202,12 @@ spec:
           configMap: { name: <svc>-config, items: [{ key: config.yaml, path: config.yaml }] }
 ```
 
-纯 gRPC 形态的服务没有 HTTP 端口，探针改用 gRPC：
-`grpc: { port: 9090 }`（K8s 1.24+ 原生支持），或 `exec` 调 `grpc_health_probe`。
+纯 gRPC 形态的服务没有 HTTP 端口，探针改用 gRPC：`grpc: { port: 9090 }`
+（K8s 1.24+ 原生支持），或 `exec` 调 `grpc_health_probe`。
+
+**但只配 readiness，liveness 留空**。gRPC 内置的 health 服务在停机时会置
+`NOT_SERVING`，那是 readiness 的语义；拿它当 liveness 就违反了本节第一条纪律——
+停机中的实例会被 kubelet 判为已死并强杀，在途请求一起丢。进程存活与否，K8s 本来
+就靠容器主进程是否退出来判断，纯 gRPC 形态不配 liveness 并不缺失什么。
+
 gRPC 端口与 HTTP 端口各自监听，正是为了让暴露范围、mesh 的协议标注与网络策略分开配。

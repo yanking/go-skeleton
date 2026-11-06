@@ -46,10 +46,10 @@ Go 微服务 monorepo 骨架:业务单 `go.mod`(开发工具链另置 `tools/` �
 | `pkg/log` | 构造统一 slog.Logger,支持从 ctx 提取 trace_id 等字段 |
 | `pkg/errcode` | 业务错误码与错误的「双通道」封装 |
 | `pkg/telemetry` | OTel 链路追踪与指标一键装配,stdout/otlp 双导出,含运行时指标;采样策略可配(生产须显式配比例采样),SDK 内部错误桥到 slog |
-| `pkg/mysql` | GORM MySQL 连接池,dbresolver 自动读写分离,内嵌 `*gorm.DB` 直接调用 |
-| `pkg/pgsql` | GORM PostgreSQL(pgx stdlib)连接池,与 `pkg/mysql` 同构 |
-| `pkg/redis` | go-redis 客户端,单机/集群经 addrs 数量自动推断,内嵌 `UniversalClient` 直接调用 |
-| `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,连接池逐 Client 独立;注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 只留 scheme://host/path,报文不记) |
+| `pkg/mysql` | GORM MySQL 连接池,dbresolver 自动读写分离,内嵌 `*gorm.DB` 直接调用;池参数零值取保守缺省,DSN 的 parseTime 与三个超时是装配期硬校验 |
+| `pkg/pgsql` | GORM PostgreSQL(pgx stdlib)连接池,与 `pkg/mysql` 同构;DSN 的 connect_timeout 与 statement_timeout 是装配期硬校验 |
+| `pkg/redis` | go-redis 客户端,内嵌 `UniversalClient` 直接调用;部署形态由 `mode` 显式声明(多地址不声明即装配期报错——推断会把独立单机地址静默当成集群) |
+| `pkg/httpc` | 出站 HTTP 客户端:按体形态给方法(JSON/表单/原文体)与 Get,超时逐调用可覆盖,响应体有大小上限,单主机连接数有闸门,连接池逐 Client 独立;**跨主机重定向默认不跟随**(自定义鉴权头会被转发);注入 TracerProvider 即埋出站 span 并透传 traceparent,注入 Logger 即逐次记出站日志(url 与错误文本都只留 scheme://host/path,报文不记) |
 | `pkg/transport` | 对外传输组件,三种形态构造器:`NewRPCServer` 纯 gRPC / `NewRPCRESTServer` gRPC + gateway 环回双端口 / `NewRESTServer` 直连 REST(pb 契约直出 HTTP,无环回,不支持流式方法)。拦截链含 errcode 出口翻译、处理超时、访问日志、panic 兜底与鉴权(otel 经 StatsHandler/otelhttp 挂载),链序见包注释;带请求体与连接数上限、摘流窗口与 liveness/readiness 两个探针 |
 | `pkg/queue` | asynq 任务队列薄封装:Client 入队 + Worker 消费(实现 app.Component) |
 
@@ -130,7 +130,7 @@ new-service 技能还没有直连 REST 变体,入口照 rpc 变体的骨架把 `
 
 接口文档:`make proto` 为带 `google.api.http` 注解的服务生成 OpenAPI v3 spec,HTTP 出口挂 `/docs` 即得阅读页;`openapi` 聚合包由 new-service 技能随首个 both 变体服务落地(模板在其 assets),机制见包注释。
 
-数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
+数据库迁移:SQL 迁移按服务放 `migrations/<svc>/`,goose 注解格式(一个文件一对 Up/Down),序号统一用 `make migrate-create SVC=<svc> NAME=<desc>` 生成的时间戳。DSN 默认从 `configs/<svc>.yaml` 的 `pgsql.write` 提取(值须带引号;其中的 `${ENV}` 引用由迁移 recipe 的 shell 在双引号内展开(shell 语义,`$NAME`、`${X:-d}` 也生效),未设置即为空串而非像服务启动那样 panic,靠库端认证失败兜底;提取时会剥掉 `statement_timeout`——服务配置里它是 10s 量级,而大表的 `CREATE INDEX`、回填动辄几分钟,带着它跑会被库端中断在半途),部署侧/CI 显式注入 `MIGRATE_DSN` 环境变量覆盖;迁移是独立的部署步骤,与服务启动分离(避免多副本抢跑),多服务共用一库时**当前共用同一张 `goose_db_version`**——Makefile 的 migrate 目标不传 goose `-table`。后果:版本号在全库范围内比较,**给某个服务新建的迁移若时间戳早于另一服务已应用的迁移,会被当作乱序跳过**;用 `make migrate-create` 生成时间戳即可避免。要改成各服务独立版本表,除了改 Makefile 还需给已有部署做一次版本表数据迁移(否则已应用的迁移在新表里显示为待应用、重跑即冲突),不能只改一边。
 
 ## 服务开发流程(从零加一个服务的动线)
 

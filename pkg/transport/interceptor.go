@@ -57,7 +57,10 @@ func BearerToken(ctx context.Context) (string, bool) {
 }
 
 // Authenticator 鉴权策略：由服务注入（pkg 不含业务概念）。
-// 返回非 nil error 即拒绝（错误应为 errcode 或 status 形态，出口层会翻译）。
+//
+// 返回非 nil error 即拒绝。拒绝原因要给客户端看的话必须用 errcode 形态——出口层
+// 对 status 形态走白名单（见 scrubStatus），别处造出的 status 只保留状态码、
+// 消息被换成通用文案。
 //
 // 放行时返回的 ctx 取代原 ctx 交给后续链路与 handler——策略因此也是注入已认证
 // 身份的地方：解析凭证与构造身份本是同一次工作，拆成「鉴权」与「取身份」两个钩子

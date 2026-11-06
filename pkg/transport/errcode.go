@@ -214,8 +214,13 @@ func renderStatus(w http.ResponseWriter, httpStatus int, st *status.Status, caus
 // businessCode 从 status details 提取本仓的业务码：只认 Domain 是本仓归属域的
 // ErrorInfo（statusFromCode 放进去的那条），取不到按通用内部错误处理。
 //
-// 必须认 Domain：不认的话下游服务带回的 ErrorInfo 会被当成本服务的码渲染出去，
-// 客户端看到的 code 落在别人的分段上——errDomain 这套机制正是为此而设。
+// 必须认 Domain：不认的话别处来的 ErrorInfo 会被当成本服务的码渲染出去，
+// 客户端看到的 code 落在别人的分段上。
+//
+// 隔离范围要说清：归属域取的是仓库名（见 errDomain），所以它隔离的是**跨仓**
+// 调用。同一个 monorepo 内 A 调 B、A 又漏翻译时，B 的消息与 B 分段的码照样会
+// 渲染出去——错误码分段是按服务划的，而归属域是按仓库的，这中间有个落差。
+// 兜住它靠的仍是「每层只翻译相邻下层的错误」这条纪律，不是这里。
 func businessCode(st *status.Status) int {
 	for _, d := range st.Details() {
 		info, ok := d.(*errdetails.ErrorInfo)

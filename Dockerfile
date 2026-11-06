@@ -7,7 +7,9 @@
 # 「不同环境下发不同文件」）。打进镜像就等于每个环境一个镜像，而两个镜像的
 # 差异除了配置还包含构建时刻的一切，追起来是另一回事。挂载方式见 docs/deploy.md。
 
-# GO_VERSION 由 Makefile 从 go.mod 提取后传入：版本只有一个来源，不与 go.mod 漂移。
+# GO_VERSION 由 Makefile 从 go.mod 提取后传入（make docker 总会传）。
+# 这里的默认值只是给「直接 docker build 不经 Makefile」留的兜底，它确实是第二个
+# 来源、会漂移——所以请走 make docker。
 ARG GO_VERSION=1.27.3
 
 # ---- 构建 ----

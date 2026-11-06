@@ -82,7 +82,8 @@ transport_section() {
 transport:
   grpc_addr: ":9090" # 业务协议出口
   # 摘流等待:先把就绪探针置红、等编排系统摘流,再关监听。零值取 5s,负值即不等。
-  # 它与 app.stop_timeout 串行相加,两段之和要装进部署侧宽限期(见 docs/deploy.md)。
+  # 它包含在 app.stop_timeout 之内(发生在传输组件的 Stop 里),不是额外的一段;
+  # stop_timeout 要装得下 drain_delay + handler_timeout + 余量(见 docs/deploy.md)。
   # drain_delay: 5s
   # 单次 unary 请求的处理超时,零值取 30s,负值即不限制;流式方法不受此限。
   # handler_timeout: 30s
@@ -122,10 +123,10 @@ esac
 # NewRPCRESTServer,本端口与 WithGateway/WithMount 一起放开(NewRPCRESTServer 必配 http_addr)。
 case "$variant" in
 	none) printf '\n# transport: # 本服务无对外出口;要出口就放开本段(整段缺失即无传输组件)\n#   grpc_addr: ":9090" # 业务协议出口,rpc/both 必填\n#   http_addr: ":8080" # gateway 转译出口,both 变体与 NewRPCRESTServer 一并放开\n' >> "configs/${svc}.yaml" ;;
-	rpc)  printf '%s' "$(transport_section)" >> "configs/${svc}.yaml" ;;
-	both) printf '%s' "$(transport_section)
-  # http_addr: \":8080\" # gateway 转译出口;initial 构造器换成 NewRPCRESTServer 时与 WithGateway 一起放开
-" >> "configs/${svc}.yaml" ;;
+	# $(...) 会吞掉尾部换行,故显式补一个——否则 yaml 最后一行没有换行符。
+	rpc)  printf '%s\n' "$(transport_section)" >> "configs/${svc}.yaml" ;;
+	both) printf '%s\n' "$(transport_section)
+  # http_addr: \":8080\" # gateway 转译出口;initial 构造器换成 NewRPCRESTServer 时与 WithGateway 一起放开" >> "configs/${svc}.yaml" ;;
 esac
 
 layers="service/repo/model/job"

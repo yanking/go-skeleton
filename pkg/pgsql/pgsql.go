@@ -176,7 +176,13 @@ func registerPoolMetrics(pools []*sql.DB, otOpts []otelsql.Option, cfg Config, l
 	for i, p := range pools {
 		label := poolLabel(i)
 		// pool 属性区分主库与各副本；取值个数等于池数、固定不变，不会撑爆指标基数。
-		opts := append(otOpts,
+		//
+		// 这里不能直接 append 到 otOpts：循环各轮会共享同一个底层数组，后一轮的
+		// 写入可能覆盖前一轮（当前 otelsql 立刻消费掉选项所以没出事，但这是个
+		// 不该留着的别名陷阱）。显式拷一份。
+		opts := make([]otelsql.Option, 0, len(otOpts)+2)
+		opts = append(opts, otOpts...)
+		opts = append(opts,
 			otelsql.WithMeterProvider(cfg.MeterProvider),
 			otelsql.WithAttributes(attribute.String("pool", label)))
 		reg, err := otelsql.RegisterDBStatsMetrics(p, opts...)

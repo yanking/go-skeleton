@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -215,6 +216,9 @@ func (c *Client) Stop(context.Context) error { return c.Close() }
 type Worker struct {
 	mux *asynq.ServeMux
 	srv *asynq.Server
+	// unhealthy 最近一次 Redis 连通性检查的结果，nil 即正常。
+	// 用指针包一层是因为 atomic.Pointer 需要具体类型，而 error 是接口。
+	unhealthy atomic.Pointer[error]
 }
 
 // NewWorker 按 cfg 构造消费者，logger 为 nil 时用 slog.Default()。装配期错误
@@ -226,7 +230,8 @@ func NewWorker(cfg Config, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	srv := asynq.NewServer(cfg.redisOpt(), asynq.Config{
+	w := &Worker{mux: asynq.NewServeMux()}
+	w.srv = asynq.NewServer(cfg.redisOpt(), asynq.Config{
 		Concurrency:     cfg.Concurrency,
 		ShutdownTimeout: cfg.ShutdownTimeout,
 		Logger:          slogLogger{logger: logger},
@@ -248,8 +253,10 @@ func NewWorker(cfg Config, logger *slog.Logger) *Worker {
 			}
 			logger.ErrorContext(ctx, "任务处理失败", attrs...)
 		}),
+		// Redis 连通性的周期检查，结果供 Healthy 取用（见那里的理由）。
+		HealthCheckFunc: w.recordHealth,
 	})
-	return &Worker{mux: asynq.NewServeMux(), srv: srv}
+	return w
 }
 
 // Handle 注册 typename 对应的处理函数：h 返回 nil 视为完成，返回 error 即按
@@ -260,6 +267,36 @@ func (w *Worker) Handle(typename string, h func(ctx context.Context, payload []b
 	w.mux.HandleFunc(typename, func(ctx context.Context, task *asynq.Task) error {
 		return h(ctx, task.Payload())
 	})
+}
+
+// recordHealth 记下 asynq 的周期健康检查结果。
+func (w *Worker) recordHealth(err error) {
+	if err == nil {
+		w.unhealthy.Store(nil)
+		return
+	}
+	w.unhealthy.Store(&err)
+}
+
+// Healthy 返回最近一次 Redis 连通性检查的结果，nil 即正常。
+//
+// 把它交给传输组件的就绪检查，队列的健康状况就参与了就绪判定：
+//
+//	transport.WithReadinessCheck(func(context.Context) error { return worker.Healthy() })
+//
+// 为什么需要它：Worker 起来之后 Redis 才不可用（实例重启、密码轮换、网络策略
+// 变更）时，asynq 在内部重试并打日志，而 Start 早已返回、app 收不到任何致命
+// 错误——于是实例一直报「就绪」，任务在队列里堆积，靠人发现。纯异步服务
+// （none 变体）尤其危险：进程里没有任何会退出的组件，Run 永久阻塞在 ctx.Done()
+// 上，除了队列长度没有别的信号。
+//
+// 尚未跑过检查时返回 nil：刚启动就把实例判为不就绪，等于让每次发布多等一个
+// 检查周期，而此时「连不上」还只是未知、不是事实。
+func (w *Worker) Healthy() error {
+	if err := w.unhealthy.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 // Name 实现 app.Component。

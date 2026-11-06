@@ -64,6 +64,51 @@ func TestFixedBearerAuthEmptyToken(t *testing.T) {
 	}
 }
 
+// TestBearerSchemeCaseInsensitive 守住 RFC 7235：auth-scheme 不区分大小写。
+// 原先只认 "Bearer " 前缀，小写 bearer 的客户端库会被判成未认证——
+// 不是安全问题，但报出来的错把排查方向带偏。
+func TestBearerSchemeCaseInsensitive(t *testing.T) {
+	const token = "right-token"
+	authn := FixedBearerAuth(token)
+	cases := []struct {
+		name    string
+		header  string
+		wantErr bool
+	}{
+		{name: "标准写法", header: "Bearer " + token},
+		{name: "全小写", header: "bearer " + token},
+		{name: "全大写", header: "BEARER " + token},
+		{name: "混合大小写", header: "BeArEr " + token},
+		{name: "错的 token 仍拒", header: "bearer wrong", wantErr: true},
+		{name: "别的 scheme 仍拒", header: "Basic " + token, wantErr: true},
+		{name: "没有空格仍拒", header: "Bearer" + token, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := metadata.NewIncomingContext(context.Background(),
+				metadata.Pairs("authorization", c.header))
+			_, err := authn(ctx, "/user.v1.UserService/GetUser")
+			if (err != nil) != c.wantErr {
+				t.Errorf("err got %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestFixedBearerAuthComparesDigest 守住比对不泄漏配置 token 的长度：
+// subtle.ConstantTimeCompare 在长度不等时直接返回 0，所以要先摘要再比。
+// 这里只能验行为（长度不同的错 token 一样被拒），耗时侧信道本身测不了。
+func TestFixedBearerAuthComparesDigest(t *testing.T) {
+	authn := FixedBearerAuth("right-token")
+	for _, wrong := range []string{"x", "wrong", "right-toke", "right-tokenn", strings.Repeat("y", 4096)} {
+		ctx := metadata.NewIncomingContext(context.Background(),
+			metadata.Pairs("authorization", "Bearer "+wrong))
+		if _, err := authn(ctx, "/m"); !errors.Is(err, errcode.ErrUnauthenticated) {
+			t.Errorf("错 token %q 应被拒, got %v", wrong, err)
+		}
+	}
+}
+
 // TestAccessLogFields 守住访问日志的字段契约：成功与失败都带 code，
 // 否则按 code 做检索、告警与成功率 SLI 时成功请求会整批漏掉；
 // code 记的是出口翻译后线上实际发出的码，否则日志里分不开客户端取消与服务端故障。

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
@@ -39,12 +40,20 @@ func TokenFromMetadata(ctx context.Context, key string) (string, bool) {
 }
 
 // BearerToken 从 metadata 的 authorization 取 Bearer 凭证。
+//
+// scheme 按 RFC 7235 不区分大小写：bearer、BEARER 都是合法写法，有些客户端库
+// 就是小写。原先只认 "Bearer " 前缀会把它们一律拒掉——fail-closed 不出安全
+// 问题，但互操作性上说不过去，而且报出来的是「未认证」，排查方向全错。
 func BearerToken(ctx context.Context) (string, bool) {
 	raw, ok := TokenFromMetadata(ctx, "authorization")
 	if !ok {
 		return "", false
 	}
-	return strings.CutPrefix(raw, "Bearer ")
+	const scheme = "bearer "
+	if len(raw) < len(scheme) || !strings.EqualFold(raw[:len(scheme)], scheme) {
+		return "", false
+	}
+	return raw[len(scheme):], true
 }
 
 // Authenticator 鉴权策略：由服务注入（pkg 不含业务概念）。
@@ -84,16 +93,28 @@ var publicMethodPrefixes = []string{
 
 // FixedBearerAuth 固定 Bearer token 比对策略：token 为空则全部拒绝
 // （fail-closed，只有探针放行），避免配置缺省时把 API 裸奔上线。
-// 比对用 subtle.ConstantTimeCompare，耗时不随匹配上的前缀长度变化。
+//
+// 比对的是两侧的 SHA-256 摘要，而不是 token 原文：subtle.ConstantTimeCompare 在
+// 两个切片长度不等时直接返回 0，于是「耗时恒定」只在长度相同时才成立，比对时间
+// 泄漏了配置里 token 的长度。摘要长度恒定，这条侧信道就没了。
+// （泄漏长度本身不致命，但它是免费修掉的——这类比对就该一次写对。）
 func FixedBearerAuth(token string) Authenticator {
-	return func(ctx context.Context, _ string) (context.Context, error) {
-		// 空 token 是「配置漏填」而非「本服务不要凭证」，必须在比对之前拦掉：
-		// 客户端发一个空的 Bearer 凭证就会与空配置比中，那正是本策略要防的裸奔。
-		if token == "" {
+	// 空 token 是「配置漏填」而非「本服务不要凭证」：客户端发一个空的 Bearer
+	// 凭证就会与空配置比中，那正是本策略要防的裸奔。在构造期就定下全拒绝，
+	// 比每次请求再判一遍更难写错。
+	if token == "" {
+		return func(context.Context, string) (context.Context, error) {
 			return nil, errcode.ErrUnauthenticated
 		}
+	}
+	want := sha256.Sum256([]byte(token))
+	return func(ctx context.Context, _ string) (context.Context, error) {
 		got, ok := BearerToken(ctx)
-		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		if !ok {
+			return nil, errcode.ErrUnauthenticated
+		}
+		sum := sha256.Sum256([]byte(got))
+		if subtle.ConstantTimeCompare(sum[:], want[:]) != 1 {
 			return nil, errcode.ErrUnauthenticated
 		}
 		// 固定凭证只证明「调用方持有本服务的 token」，没有身份可注入，原样返回。

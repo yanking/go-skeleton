@@ -4,6 +4,7 @@ package initial
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/yanking/go-skeleton/internal/__svc__/config"
@@ -42,8 +43,11 @@ func createInfra(ctx context.Context, c config.Config, logger *slog.Logger) (com
 // createServer 构造业务组件。传输开关就是 transport 段：整段缺失即无对外出口。
 // 只组装不造资源——db、redis 等句柄由 createInfra 侧产出后传参使用。
 func createServer(ctx context.Context, c config.Config, logger *slog.Logger, tel *telemetry.Telemetry) (components []app.Component) {
+	// 本变体必有对外出口，所以传输段缺失是配置错误，不是「这个服务不开端口」：
+	// 放过的话服务会「启动成功」却不监听任何端口，只有探针能发现。
+	// 真要做无出口的服务，用 new-service 的 none 变体。
 	if c.Transport == (transport.Config{}) {
-		return components
+		panic(errors.New("装配 __svc__: 配置缺 transport 段，而本服务有对外出口"))
 	}
 
 	// 注入即自动挂拦截链（出口翻译 → 处理超时 → 访问日志 → panic 兜底 → 鉴权），

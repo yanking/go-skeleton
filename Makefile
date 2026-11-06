@@ -12,7 +12,7 @@ CMDS := $(notdir $(wildcard cmd/*))
 SVC ?= $(firstword $(CMDS))
 
 .DEFAULT_GOAL := help
-.PHONY: help new-project build run vet test check lint vuln fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e clean
+.PHONY: help new-project build run vet test race check lint vuln fmt tidy tools proto proto-lint migrate-create migrate-up migrate-down migrate-status e2e docker clean
 
 help: ## 显示帮助
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -38,6 +38,12 @@ vet: ## 静态检查 go vet ./...
 test: ## 全量测试 go test ./...
 	go test ./...
 
+# race 不并进 check:它让测试慢几倍,而 check 是每次改动都要跑的。
+# 本仓的核心是并发组件编排(pkg/app 的启停、pkg/transport 的停机),所以它必须有
+# 机器判据——由 CI 的 race job 每次 push/PR 跑,而不是靠开发者记得。
+race: ## 竞态检测 go test -race ./...
+	go test -race ./...
+
 # 四步各占一行:make 逐行执行、非零即停,失败时报出的就是失败的那一步。
 # 不要合成 `a && b && c || d` ——那种写法会把任何一步的失败都归因到最后的 d。
 check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
@@ -46,8 +52,11 @@ check: ## 提交门槛(宪法第 5 条):build/vet/test 全绿 + gofmt 零漂移
 	go test ./...
 	@drift=$$(gofmt -l .); test -z "$$drift" || { echo "$$drift"; echo ">> 存在未格式化文件,运行 make fmt"; exit 1; }
 
-# lint / vuln 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
-# 改它的语义属于宪法修订(须单独提交、单独评审)。二者在 CI(.github/workflows/ci.yml)里各占一个 job。
+# lint / vuln / race 不并进 check:宪法第 5 条把提交门槛定义为 build/vet/test + gofmt,
+# 改它的语义属于宪法修订(须单独提交、单独评审)。三者在 CI(.github/workflows/ci.yml)里各占一个 job。
+#
+# 宪法第 4 条(凭证只能写 ${ENV_NAME} 引用)的机器判据在 test/secrets/,它是普通的
+# go test,因此已经在 check 里——窄规则做成测试,比引入通用 secret 扫描工具更合身。
 lint: tools ## golangci-lint 全量检查(linter 选取与例外见 .golangci.yml)
 	$(TOOLS_DIR)/golangci-lint run ./...
 
@@ -127,6 +136,16 @@ e2e: ## 端对端测试: make e2e SVC=<svc>(前置见 test/e2e/<svc>/run.sh 头�
 	@test -x test/e2e/$(SVC)/run.sh || { echo ">> 暂无 $(SVC) 的端对端测试(test/e2e/$(SVC)/run.sh 不存在)"; exit 1; }
 	@test -x "$(GOOSE)" || $(MAKE) --no-print-directory tools
 	test/e2e/$(SVC)/run.sh
+
+# 容器镜像:配置不打进镜像(同一镜像跑所有环境,配置由部署侧挂载),理由见 Dockerfile
+# 顶部与 docs/deploy.md。Go 版本从 go.mod 提取后传进去,版本只有一个来源。
+GO_VERSION := $(shell sed -n 's/^go \([0-9.]*\)$$/\1/p' go.mod)
+
+docker: ## 构建服务镜像: make docker SVC=<svc> [TAG=<tag>]
+	@test -n "$(SVC)" -a -d "cmd/$(SVC)" || { echo ">> 服务不存在。用法: make docker SVC=<name>;现有: $(if $(CMDS),$(CMDS),无——先用 new-service 技能生成)"; exit 1; }
+	@test -n "$(GO_VERSION)" || { echo ">> 从 go.mod 取不到 go 版本"; exit 1; }
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg SVC=$(SVC) \
+		-t $(SVC):$(if $(TAG),$(TAG),dev) .
 
 clean: ## 清理构建产物
 	rm -rf $(BIN_DIR)

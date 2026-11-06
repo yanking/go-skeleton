@@ -1,0 +1,14 @@
+# 构建上下文只需要源码与依赖清单。排掉的这些要么是产物、要么是本地工作台，
+# 进了上下文只会拖慢构建、让镜像层缓存失效（bin/ 每次 make build 都变）。
+.git
+.github
+bin
+docs
+test/e2e
+.claude
+.superpowers
+.zcode
+.idea
+
+# 配置不进镜像（见 Dockerfile 顶部的理由），顺带防止本地带秘密项的那份被拷进去。
+configs

@@ -439,7 +439,8 @@ func TestCheckParseError(t *testing.T) {
 }
 
 // TestLayout 检查真实仓库。夹具测试证明规则拦得住违规，但干净的仓库本身证明不了什么，
-// 所以另设防空跑检查：internal/ 存在却一个服务都没识别出来，多半是根目录或路径算错了。
+// 所以另设防空跑检查：internal/ 下确实有 Go 代码却一个服务都没识别出来，多半是根目录
+// 或路径算错了。
 func TestLayout(t *testing.T) {
 	root := filepath.Join("..", "..")
 	modulePath, err := readModulePath(filepath.Join(root, "go.mod"))
@@ -453,15 +454,37 @@ func TestLayout(t *testing.T) {
 	for _, v := range violations {
 		t.Error(v)
 	}
-	if _, err := os.Stat(filepath.Join(root, "internal")); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return // 还没有 internal/ 的仓库（如模板主干），无事可查
-		}
+
+	// 判据是「有没有 Go 文件」，不是「internal/ 存在」。空的 internal/（或只剩空
+	// 子目录的）很常见：切分支留下的、渲染服务后又删掉代码的、手工 mkdir 的。
+	// 而 git 不跟踪空目录，于是拿「目录存在」当判据会让提交门槛只在本地红、CI
+	// 永远绿，报错还写着「检查根目录是否算错」——归因完全错位。
+	hasGo, err := containsGoFile(filepath.Join(root, "internal"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if services == 0 {
-		t.Fatal("internal/ 存在，却没识别出任何服务：检查根目录是否算错")
+	if hasGo && services == 0 {
+		t.Fatal("internal/ 下有 Go 文件，却没识别出任何服务：检查根目录是否算错")
 	}
+}
+
+// containsGoFile 判断 dir 下（含各级子目录）有没有 Go 文件；dir 不存在时返回 false。
+func containsGoFile(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".go") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return found, err
 }
 
 // readModulePath 读 goMod（go.mod 的路径）的 module 行，返回模块路径。
@@ -494,5 +517,30 @@ func writeTree(t *testing.T, root string, files map[string]string) {
 		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestContainsGoFile 钉住反空跑检查的判据：空目录不算、有 Go 文件才算。
+//
+// 这条判据本身出过问题——原先拿「internal/ 目录存在」当判据，于是一个切分支
+// 留下的空目录就能让提交门槛变红，而 git 不跟踪空目录、CI 永远绿，报错还写着
+// 「检查根目录是否算错」，归因完全错位。
+func TestContainsGoFile(t *testing.T) {
+	root := t.TempDir()
+
+	if got, err := containsGoFile(filepath.Join(root, "nope")); err != nil || got {
+		t.Errorf("目录不存在应返回 false, got (%v, %v)", got, err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "internal", "leftover"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := containsGoFile(filepath.Join(root, "internal")); err != nil || got {
+		t.Errorf("只有空子目录应返回 false, got (%v, %v)", got, err)
+	}
+
+	writeTree(t, root, map[string]string{"internal/shop/service/item/service.go": "package service\n"})
+	if got, err := containsGoFile(filepath.Join(root, "internal")); err != nil || !got {
+		t.Errorf("有 Go 文件应返回 true, got (%v, %v)", got, err)
 	}
 }

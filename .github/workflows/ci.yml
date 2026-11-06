@@ -1,15 +1,30 @@
 # 提交门槛的机器执行：宪法第 5 条的 make check 在 push / PR 上必跑。
-# lint 与 vuln 不并进 check（理由见 README「里面有什么」），各占一个 job 并行跑。
-# 工具链版本钉在 tools/go.mod，由 make tools 装进 bin/tools/——与本地一致。
+# lint、vuln 与 race 不并进 check（理由见 README「里面有什么」与 Makefile 的注释），
+# 各占一个 job 并行跑。工具链版本钉在 tools/go.mod，由 make tools 装进 bin/tools/——与本地一致。
+#
+# 宪法第 4 条（凭证只能写 ${ENV_NAME} 引用）的判据在 test/secrets/，它是普通的
+# go test，所以已经被 check 覆盖，不另设 job。
 name: ci
 
 on:
   push:
     branches: [main, example]
   pull_request:
+  # 漏洞是时间的函数，不是代码的函数：仓库一个月不动，期间公布的漏洞也要有人知道。
+  # 只靠 push/PR 触发的话，模板仓安静下来就等于停止扫描了。
+  schedule:
+    - cron: "17 3 * * 1"
+  # 允许手动触发：排查 CI 自身问题时不必靠空提交。
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# 同一分支上新的 push 取消尚未跑完的那次：省队列，也避免看到过期结论。
+# 定时任务与手动触发各自成组，不互相取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -19,7 +34,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
       - run: make check
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make race
 
   lint:
     runs-on: ubuntu-latest

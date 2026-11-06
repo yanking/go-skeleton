@@ -14,8 +14,24 @@ import (
 	"github.com/yanking/go-skeleton/pkg/log"
 )
 
+// newSampler 按配置构造采样器。取值已由 Sampler.UnmarshalText 与 Config.Validate
+// 把住（含比例采样的 sample_ratio 范围），故这里的 default 分支只会在绕过配置文件
+// 直接在 Go 里构造且写错时触发。
+func newSampler(cfg Config) (sdktrace.Sampler, error) {
+	switch cfg.Sampler {
+	case "", SamplerParentBasedAlwaysOn:
+		return sdktrace.ParentBased(sdktrace.AlwaysSample()), nil
+	case SamplerParentBasedRatio:
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRatio)), nil
+	case SamplerAlwaysOff:
+		return sdktrace.NeverSample(), nil
+	default:
+		return nil, fmt.Errorf("构造采样器: 未知采样器 %q", cfg.Sampler)
+	}
+}
+
 // newTracerProvider 构造带批量导出的 TracerProvider；span 在内存攒批异步写出，
-// 停机时由 Shutdown 兜底 flush。
+// 停机时由 Shutdown 兜底 flush。采样策略由配置给出（默认全采，见包注释）。
 func newTracerProvider(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, error) {
 	var exp sdktrace.SpanExporter
 	var err error
@@ -35,9 +51,15 @@ func newTracerProvider(ctx context.Context, cfg Config, res *resource.Resource) 
 		return nil, fmt.Errorf("构造 trace 导出器: %w", err)
 	}
 
+	sampler, err := newSampler(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(exp),
+		sdktrace.WithSampler(sampler),
 	), nil
 }
 

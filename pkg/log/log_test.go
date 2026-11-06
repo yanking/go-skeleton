@@ -292,3 +292,41 @@ func TestFormatUnmarshalText(t *testing.T) {
 		})
 	}
 }
+
+// TestLevelVarRuntimeAdjust 钉住运行期调级：生产上临时开 debug 是最常见的排障动作，
+// 靠改 yaml 重启会把现场一起丢掉。
+func TestLevelVarRuntimeAdjust(t *testing.T) {
+	var buf bytes.Buffer
+	levelVar := new(slog.LevelVar)
+	logger := log.New(log.Config{
+		Service:  "svc",
+		Level:    slog.LevelInfo,
+		Writer:   &buf,
+		LevelVar: levelVar,
+	})
+
+	// 初值跟随 Level：debug 被滤掉。
+	logger.Debug("调级前的 debug")
+	if got := messages(t, &buf); len(got) != 0 {
+		t.Fatalf("Level=info 时 debug 应被滤掉，实际 %v", got)
+	}
+	if got := levelVar.Level(); got != slog.LevelInfo {
+		t.Errorf("LevelVar 初值 got %v, want %v", got, slog.LevelInfo)
+	}
+
+	// 运行期调到 debug，无需重建 Logger。
+	buf.Reset()
+	levelVar.Set(slog.LevelDebug)
+	logger.Debug("调级后的 debug")
+	if got := messages(t, &buf); len(got) != 1 || got[0] != "调级后的 debug" {
+		t.Errorf("调级后 debug 应放行，实际 %v", got)
+	}
+
+	// 调回去同样生效（排障完要收回噪音）。
+	buf.Reset()
+	levelVar.Set(slog.LevelWarn)
+	logger.Info("收回后的 info")
+	if got := messages(t, &buf); len(got) != 0 {
+		t.Errorf("调到 warn 后 info 应被滤掉，实际 %v", got)
+	}
+}

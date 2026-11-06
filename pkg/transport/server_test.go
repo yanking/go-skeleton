@@ -32,21 +32,21 @@ func TestNewRPCServerPanics(t *testing.T) {
 		{name: "grpc_addr 为空", cfg: Config{}},
 		{
 			name: "纯 gRPC 形态却配了 http_addr",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		},
 		{
 			name: "环回路由注册在纯 gRPC 形态",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithGateway(noopGateway)},
 		},
 		{
 			name: "直连路由注册在纯 gRPC 形态",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway)},
 		},
 		{
 			name: "挂载点没有 HTTP 出口",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithMount("/docs", http.NewServeMux())},
 		},
 	}
@@ -70,27 +70,27 @@ func TestNewRPCRESTServerPanics(t *testing.T) {
 	}{
 		{
 			name: "grpc_addr 为空",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithGateway(noopGateway)},
 		},
-		{name: "双端口形态缺 http_addr", cfg: Config{GRPCAddr: "127.0.0.1:0"}},
+		{name: "双端口形态缺 http_addr", cfg: Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1}},
 		{
 			name: "配了 http_addr 却没有 gateway",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		},
 		{
 			name: "直连路由注册在环回形态",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithGateway(noopGateway), WithDirectGateway(noopDirectGateway)},
 		},
 		{
 			name: "挂载模式占用根路径",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithGateway(noopGateway), WithMount("/", http.NewServeMux())},
 		},
 		{
 			name: "挂载模式不以 / 开头",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithGateway(noopGateway), WithMount("docs", http.NewServeMux())},
 		},
 	}
@@ -115,26 +115,26 @@ func TestNewRESTServerPanics(t *testing.T) {
 		{name: "http_addr 为空", cfg: Config{}},
 		{
 			name: "直连形态却配了 grpc_addr",
-			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway)},
 		},
 		{
 			name: "没有直连路由",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		},
 		{
 			name: "环回路由注册在直连形态",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway), WithGateway(noopGateway)},
 		},
 		{
 			name: "gRPC 服务注册在直连形态",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway), WithService(registerEcho)},
 		},
 		{
 			name: "gRPC 拦截器注册在直连形态",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway),
 				WithUnaryInterceptor(func(context.Context, any, *grpc.UnaryServerInfo, grpc.UnaryHandler) (any, error) {
 					return nil, nil
@@ -142,7 +142,7 @@ func TestNewRESTServerPanics(t *testing.T) {
 		},
 		{
 			name: "挂载模式占用根路径",
-			cfg:  Config{HTTPAddr: "127.0.0.1:0"},
+			cfg:  Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 			opts: []Option{WithDirectGateway(noopDirectGateway), WithMount("/", http.NewServeMux())},
 		},
 	}
@@ -160,7 +160,7 @@ func TestNewRESTServerPanics(t *testing.T) {
 
 // 纯 gRPC 形态：不配 http_addr 即不监听 HTTP，只有 gRPC 一个端口。
 func TestServerGRPCOnly(t *testing.T) {
-	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0"})
+	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1})
 	if srv.http != nil || srv.httpLn != nil || srv.conn != nil {
 		t.Error("未配 http_addr 不应装配 HTTP 出口")
 	}
@@ -186,7 +186,7 @@ func TestServerRPCREST(t *testing.T) {
 		_, _ = io.WriteString(w, "docs-subtree")
 	})
 
-	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithService(registerEcho),
 		WithGateway(echoGateway),
 		WithMount("/docs", docs),
@@ -272,7 +272,7 @@ func TestServerRPCREST(t *testing.T) {
 // 鉴权对两种协议同时生效：HTTP 的 Authorization 头经 gateway 转成 metadata，
 // 与原生 gRPC 调用穿过同一个拦截器；探针与 reflection 恒定放行。
 func TestServerAuthCoversBothProtocols(t *testing.T) {
-	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+	srv := NewRPCRESTServer(context.Background(), Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithAuthenticator(FixedBearerAuth("tok")),
 		WithService(registerEcho),
 		WithGateway(echoGateway),
@@ -347,7 +347,7 @@ func TestServerRESTDirect(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithLogger(logger),
 		WithDirectGateway(directEchoGateway),
 		WithMount("/docs", docs),
@@ -443,7 +443,7 @@ func TestServerRESTDirect(t *testing.T) {
 // 直连形态的鉴权：与环回形态（TestServerAuthCoversBothProtocols）同一策略、同一拒绝体；
 // /healthz 在 gateway 路由之外，不经 middleware，恒免鉴权。
 func TestServerRESTAuth(t *testing.T) {
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithAuthenticator(FixedBearerAuth("tok")),
 		WithDirectGateway(directEchoGateway),
 	)

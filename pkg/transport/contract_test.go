@@ -33,7 +33,7 @@ func TestGRPCTraceContinuation(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0"},
+	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithTracerProvider(tp), WithService(registerEcho))
 	served := start(t, srv)
 
@@ -63,7 +63,7 @@ func TestGRPCTraceContinuation(t *testing.T) {
 // 允许、请求解析失败原先一律落进 10003 内部错误，客户端按 code 分支时分不开
 // 「路径写错了」与「服务端崩了」；405 的 HTTP 状态还会被 gRPC 码映射改写成 501。
 func TestRoutingErrorsCarryBusinessCode(t *testing.T) {
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithDirectGateway(guardGateway))
 	served := start(t, srv)
 	base := "http://" + srv.httpLn.Addr().String()
@@ -119,7 +119,7 @@ func TestRoutingErrorsCarryBusinessCode(t *testing.T) {
 func TestCredentialSingleChannel(t *testing.T) {
 	const token = "right-token"
 	srv := NewRPCRESTServer(context.Background(),
-		Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+		Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithAuthenticator(FixedBearerAuth(token)),
 		WithService(registerEcho),
 		WithGateway(echoGateway))
@@ -161,7 +161,7 @@ func TestLoopbackTraceContinuation(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	srv := NewRPCRESTServer(context.Background(),
-		Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0"},
+		Config{GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithTracerProvider(tp),
 		WithService(registerEcho),
 		WithGateway(echoGateway))

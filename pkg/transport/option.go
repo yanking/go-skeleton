@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 )
@@ -38,9 +39,16 @@ type mount struct {
 	handler http.Handler
 }
 
+// ReadinessCheck 一个依赖就绪检查，返回非 nil 即本实例尚不能接流量。
+// 实现应当轻量且带 ctx 超时：就绪探针每隔几秒打一次，检查自己卡住会让
+// 实例被误判为不可用。
+type ReadinessCheck func(ctx context.Context) error
+
 // options 汇总全部选项，零值即「只有 gRPC、无追踪无日志无鉴权」。
 type options struct {
 	tracerProvider trace.TracerProvider
+	meterProvider  metric.MeterProvider
+	readiness      []ReadinessCheck
 	logger         *slog.Logger
 	authenticator  Authenticator
 	services       []ServiceRegistrar
@@ -64,6 +72,30 @@ func newOptions(opts []Option) *options {
 // WithTracerProvider 注入链路追踪，不给则不埋 span。
 func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(o *options) { o.tracerProvider = tp }
+}
+
+// WithMeterProvider 注入指标 Provider，不给则不埋请求指标。
+//
+// 它带来的是 RED 三件套——请求量、错误率、延迟分位（otelgrpc 的
+// rpc.server.* 与 otelhttp 的 http.server.*）。不注入的话 instrumentation
+// 回落到 otel 的 no-op 全局：不报错，只是这些指标静默消失，而「接口变慢了、
+// 错误率涨了」恰恰只能靠它们定位。
+func WithMeterProvider(mp metric.MeterProvider) Option {
+	return func(o *options) { o.meterProvider = mp }
+}
+
+// WithReadinessCheck 追加依赖就绪检查，可重复调用；全部通过才算就绪。
+//
+// 检查结果由 HTTP 的 /readyz 与 gRPC health 服务共用。典型用法是 ping 数据库：
+//
+//	transport.WithReadinessCheck(func(ctx context.Context) error {
+//	    return db.WithContext(ctx).Exec("SELECT 1").Error
+//	})
+//
+// 这是「装配期不 ping 库」那个取舍的另一半：不 ping 是因为 DB 比进程晚就绪是
+// 常态，而连不上库的实例不该接流量——两件事由这里分开表达。
+func WithReadinessCheck(checks ...ReadinessCheck) Option {
+	return func(o *options) { o.readiness = append(o.readiness, checks...) }
 }
 
 // WithLogger 注入访问日志输出，不给则不挂访问日志拦截器。

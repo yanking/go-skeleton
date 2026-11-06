@@ -51,7 +51,7 @@ var panicDesc = grpc.ServiceDesc{
 // 远程 kill 开关。
 func TestGRPCPanicRecovered(t *testing.T) {
 	var buf safeBuffer
-	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0"},
+	srv := NewRPCServer(Config{GRPCAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithLogger(slog.New(slog.NewJSONHandler(&buf, nil))),
 		WithService(func(s *grpc.Server) { s.RegisterService(&panicDesc, nil) }))
 	served := start(t, srv)
@@ -130,7 +130,7 @@ func guardGateway(_ context.Context, mux *runtime.ServeMux) error {
 // slog 里一条记录都没有，堆栈走标准 log 的 stderr 纯文本。
 func TestDirectPanicRecovered(t *testing.T) {
 	var buf safeBuffer
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithLogger(slog.New(slog.NewJSONHandler(&buf, nil))),
 		WithDirectGateway(guardGateway))
 	served := start(t, srv)
@@ -170,7 +170,7 @@ func TestDirectPanicRecovered(t *testing.T) {
 // 再渲染错误体——两段 JSON 拼在一起客户端解析不出来，而访问日志还会把它记成当初
 // 那个成功状态码（错误被吞成成功，比不 recover 更糟）。此时断连是唯一诚实的信号。
 func TestDirectPanicAfterWriteAborts(t *testing.T) {
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0"},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", DrainDelay: -1},
 		WithDirectGateway(guardGateway))
 	served := start(t, srv)
 
@@ -191,7 +191,7 @@ func TestDirectPanicAfterWriteAborts(t *testing.T) {
 func TestRequestBodyLimit(t *testing.T) {
 	const limit = 1024
 	srv := NewRESTServer(context.Background(),
-		Config{HTTPAddr: "127.0.0.1:0", MaxRequestBytes: limit},
+		Config{HTTPAddr: "127.0.0.1:0", MaxRequestBytes: limit, DrainDelay: -1},
 		WithDirectGateway(guardGateway))
 	served := start(t, srv)
 	base := "http://" + srv.httpLn.Addr().String() + "/v1/echo-body"
@@ -228,7 +228,7 @@ func TestRequestBodyLimit(t *testing.T) {
 // 没有它 handler 可以一直跑下去，下游卡住时请求无限堆积、没有自然泄压点。
 func TestHandlerTimeout(t *testing.T) {
 	srv := NewRESTServer(context.Background(),
-		Config{HTTPAddr: "127.0.0.1:0", HandlerTimeout: 50 * time.Millisecond},
+		Config{HTTPAddr: "127.0.0.1:0", HandlerTimeout: 50 * time.Millisecond, DrainDelay: -1},
 		WithDirectGateway(guardGateway))
 	served := start(t, srv)
 
@@ -279,7 +279,7 @@ func TestHandlerTimeoutDisabled(t *testing.T) {
 func TestStopNotifiesInflightHandlers(t *testing.T) {
 	inflight := make(chan struct{})
 	canceled := make(chan struct{})
-	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", HandlerTimeout: -1},
+	srv := NewRESTServer(context.Background(), Config{HTTPAddr: "127.0.0.1:0", HandlerTimeout: -1, DrainDelay: -1},
 		WithDirectGateway(func(_ context.Context, mux *runtime.ServeMux) error {
 			return mux.HandlePath("GET", "/v1/hold",
 				func(w http.ResponseWriter, r *http.Request, _ map[string]string) {

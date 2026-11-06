@@ -13,32 +13,54 @@
 //     注册进 gateway 路由，请求只做一次 JSON 编解码、直接函数调用 handler，不经
 //     环回、不做第二份 proto 编解码，高 QPS 或大报文的 HTTP 出口用它。代价见
 //     WithDirectGateway：流式方法一律 Unimplemented；没有 gRPC 端口，东西向调用方
-//     与 grpcurl 无处可去；客户端断连不会取消处理中的请求（生成代码以注册 ctx
-//     为请求 ctx 的父，取消只随停机信号传导）。
+//     与 grpcurl 无处可去。
 //
 // 两个端口各自监听：gRPC 与 HTTP 的暴露范围、mesh 协议标注（Istio 的端口名 /
 // appProtocol 是按端口生效的）、网络策略往往不同——常见形态就是 gRPC 只走东西向、
 // HTTP 才对外。
 //
-// gRPC 侧拦截链按注册顺序组装、先注册者在最外层，业务 handler 位于最内：errcode
-// 出口翻译固定为链首（仓库级约定，后续选项只能追加、顶不掉它；漏翻译的错误在此
-// 兜成通用内部错误、ctx 超时/取消兜成 10005/10006、故障类 status 只换消息，原文
-// 只进访问日志）；其后是访问日志（WithLogger 才挂：成功 Info、失败 Warn，记方法、
-// 来源地址、状态码与耗时，trace_id 由日志钩子附带）与鉴权（WithAuthenticator 才挂：
-// health/reflection 前缀豁免——拦探针会让编排系统误判实例死亡；策略由服务注入，
-// 放行时可经返回的 ctx 注入已认证身份，FixedBearerAuth 做固定 token 比对、
-// 空 token 全拒绝），再后是 WithUnaryInterceptor /
-// WithStreamInterceptor 传入的自定义拦截器；otel 遥测另经 StatsHandler 挂载
-// （WithTracerProvider 才挂）。经 gateway 环回的 HTTP 流量穿过同一条链。
+// gRPC 侧拦截链按注册顺序组装、先注册者在最外层，业务 handler 位于最内，顺序是
+// 出口翻译 → 处理超时 → 访问日志 → panic 兜底 → 鉴权 → 自定义拦截器：
+//
+//   - errcode 出口翻译固定为链首（仓库级约定，Chain 形态的后续选项只能追加、
+//     顶不掉它；漏翻译的错误在此兜成通用内部错误、ctx 超时/取消兜成 10005/10006、
+//     非本包造出的 status 只保留码，原文只进访问日志）；
+//   - 处理超时给 unary 请求的 ctx 设 deadline（Config.HandlerTimeout，流式不受限）；
+//   - 访问日志（WithLogger 才挂：成功 Info、失败 Warn，记 proto/call/peer/code/
+//     duration，trace_id 由日志钩子附带）；
+//   - panic 兜底在访问日志之内、鉴权之外：panic 先转成通用内部错误，访问日志才
+//     记得到这次请求，鉴权策略自己 panic 也一并兜住。没有它时一次 handler 里的
+//     空指针会打死整个进程；
+//   - 鉴权（WithAuthenticator 才挂：health 与 reflection 前缀豁免——拦探针会让
+//     编排系统误判实例死亡；策略由服务注入，放行时可经返回的 ctx 注入已认证身份，
+//     FixedBearerAuth 做固定 token 比对、空 token 全拒绝）；
+//   - 最内是 WithUnaryInterceptor / WithStreamInterceptor 传入的自定义拦截器。
+//
+// otel 遥测另经 StatsHandler 挂载（WithTracerProvider / WithMeterProvider 才挂，
+// 后者给的是 RED 三件套）。经 gateway 环回的 HTTP 流量穿过同一条链。
+//
+// 有一处盲区要知道：报文超限、编解码失败这类错误发生在 pb 生成代码的 dec() 阶段，
+// 比拦截链更早，于是既没有业务码也不进访问日志——那部分可观测性要靠边缘网关或
+// mesh 的指标补。
 //
 // 直连 REST 形态没有 gRPC 拦截器可挂，等价链路经 runtime.WithMiddlewares 组装在
-// 每条 gateway 路由上，链序相同（访问日志在外、鉴权在内，WithMiddleware 注入的自定义
-// 中间件再在其内、handler 之外）：出口翻译由 mux 的错误
+// 每条 gateway 路由上，链序与 gRPC 侧一致（处理超时 → 访问日志 → panic 兜底 →
+// 鉴权 → WithMiddleware 注入的自定义中间件 → handler）：出口翻译由 mux 的错误
 // 处理器承担，与环回形态共用同一渲染，客户端契约一致；鉴权策略收到的 method 参数
-// 是 HTTP 路径而非 gRPC 方法名（细节见 middleware.go）。otel 经 otelhttp 包住整个
-// mux（WithTracerProvider 才挂），入站 W3C traceparent 也因此得以提取续链——环回
-// 形态的 HTTP 端口没有这层提取。/healthz 与 WithMount 挂载点不经 middleware，对
-// 探针与文档页保持免鉴权。
+// 是 HTTP 路径而非 gRPC 方法名（细节见 middleware.go）。两种 HTTP 形态都经 otelhttp
+// 包住整个 mux，入站 W3C traceparent 因此得以提取续链。探针与 WithMount 挂载点不经
+// middleware，对编排系统与文档页保持免鉴权。
+//
+// 探针与摘流（部署前必读）：
+//   - /healthz 是 liveness「进程还活着吗」，恒定 200，连停机期也是——它转红会让
+//     编排系统强杀进程，而停机中的实例正需要时间排空；依赖不可用同样不该让它转红，
+//     重启进程治不好一个挂掉的数据库。
+//   - /readyz 是 readiness「现在能接流量吗」，查就绪状态位与 WithReadinessCheck
+//     注入的依赖检查。gRPC 侧的对等物是内置的 health 服务。
+//   - Stop 先把就绪状态置为不可用、等 Config.DrainDelay（默认 5s）再关监听。
+//     没有这段等待就是「收到 TERM 的瞬间拒连」：LB 摘流要数百毫秒到数秒，那段
+//     窗口的新连接拿到的是 TCP 层 connection refused，客户端重试策略往往不覆盖。
+//     这段等待要算进部署侧的宽限期预算，它与 app 的 stop_timeout 是串行相加的两段。
 //
 // 用法：
 //
@@ -61,6 +83,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
@@ -112,6 +135,16 @@ const (
 	defaultMaxConnectionAgeGrace = 10 * time.Second
 )
 
+// defaultDrainDelay 摘流等待的默认值：Stop 先把健康状态置为不可用，等这段时间
+// 让编排系统把本实例从负载均衡摘掉，再关闭监听。
+//
+// 没有这段等待就是「收到 TERM 的瞬间拒连」：LB 与 kube-proxy 摘流依赖 Endpoint
+// 更新或就绪探针转红，需要数百毫秒到数秒，而 Shutdown / GracefulStop 的第一件事
+// 就是关 listener。这段窗口里到达的新连接拿到的是 TCP 层的 connection refused
+// （不是 503），客户端的重试策略往往不覆盖它——每次滚动更新都会丢一批请求，
+// 而且表现为客户端侧的连接错误，很难归因到发布。
+const defaultDrainDelay = 5 * time.Second
+
 // 请求体与处理耗时的默认上限，可经 Config 覆盖。
 const (
 	// defaultMaxRequestBytes 单个 HTTP 请求体的大小上限，取与 grpc-go 默认的
@@ -144,6 +177,28 @@ type Config struct {
 	//
 	// 流式方法不受此限：长连接是它的常态。
 	HandlerTimeout time.Duration `yaml:"handler_timeout"`
+	// DrainDelay 摘流等待，零值取 defaultDrainDelay，负值即不等（本地开发、
+	// 单实例部署，或摘流由 preStop 钩子负责时）。须算进部署侧的宽限期预算：
+	// 它与 app 的 stop_timeout 是串行相加的两段。
+	DrainDelay time.Duration `yaml:"drain_delay"`
+	// Reflection 是否开启 gRPC reflection（grpcurl 等工具靠它发现服务与字段结构）。
+	//
+	// 默认关。它恒定免鉴权（探针与它一起在豁免名单里），打开就等于把完整的服务
+	// 契约对任何能连到 gRPC 端口的人公开——同集群的 pod、SSRF、端口误暴露都算，
+	// 而那正是构造攻击载荷的第一步。本地开发与联调打开，生产保持关闭。
+	Reflection bool `yaml:"reflection"`
+}
+
+// drainDelay 取生效的摘流等待，0 即不等。
+func (c Config) drainDelay() time.Duration {
+	switch {
+	case c.DrainDelay == 0:
+		return defaultDrainDelay
+	case c.DrainDelay < 0:
+		return 0
+	default:
+		return c.DrainDelay
+	}
 }
 
 // maxRequestBytes 取生效的请求体上限，0 即不限制。
@@ -176,6 +231,14 @@ func (c Config) handlerTimeout() time.Duration {
 type Server struct {
 	grpc   *grpc.Server
 	grpcLn net.Listener
+	// health gRPC 健康服务，Stop 时置 NOT_SERVING 以触发摘流；纯 HTTP 形态为 nil。
+	health *health.Server
+	// serving 就绪状态位，/readyz 与 gRPC health 共用同一个事实来源。
+	serving atomic.Bool
+	// readiness 依赖就绪检查，由服务经 WithReadinessCheck 注入。
+	readiness []ReadinessCheck
+	// drainDelayValue 摘流等待时长，见 Config.DrainDelay。
+	drainDelayValue time.Duration
 
 	// 以下字段仅在开启 HTTP 出口时非 nil，nil 即纯 gRPC 形态。
 	http   *http.Server
@@ -199,7 +262,8 @@ func NewRPCServer(cfg Config, opts ...Option) *Server {
 		panic(fmt.Errorf("装配 transport: 监听 gRPC %s: %w", cfg.GRPCAddr, err))
 	}
 
-	s := &Server{grpc: newGRPCServer(cfg, o), grpcLn: grpcLn}
+	s := newServer(cfg, o)
+	s.grpc, s.grpcLn = newGRPCServer(cfg, o, s), grpcLn
 	for _, register := range o.services {
 		register(s.grpc)
 	}
@@ -218,7 +282,8 @@ func NewRPCRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 		panic(fmt.Errorf("装配 transport: 监听 gRPC %s: %w", cfg.GRPCAddr, err))
 	}
 
-	s := &Server{grpc: newGRPCServer(cfg, o), grpcLn: grpcLn}
+	s := newServer(cfg, o)
+	s.grpc, s.grpcLn = newGRPCServer(cfg, o, s), grpcLn
 	for _, register := range o.services {
 		register(s.grpc)
 	}
@@ -228,15 +293,26 @@ func NewRPCRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 
 // NewRESTServer 构造直连 REST 形态：只监听 http_addr，没有 gRPC 服务器——handler
 // 实现经 WithDirectGateway 直接注册进 gateway 路由（能力与代价见 WithDirectGateway）。
-// 装配期语义同 NewRPCServer。传给本函数的 ctx 成为直连路由的注册 ctx，按 gateway
-// 生成代码的约定它是每个请求 handler ctx 的父——ctx 取消（停机信号）会连带取消
-// 处理中的请求，应传 App 的根 ctx。
+// 装配期语义同 NewRPCServer。
+//
+// 传给本函数的 ctx 只用于路由注册，不是请求 handler ctx 的父：grpc-gateway 的
+// request_context 生成选项（本仓在 buf.gen.yaml 里显式钉为 true）让生成代码以
+// req.Context() 为父，于是客户端断连**会**取消 handler ctx，而停机信号**到不了**
+// 在途 handler。要让在途请求感知停机，靠的是 Stop 在宽限期耗尽后取消 http.Server
+// 的 BaseContext（见 baseContext），不是这个 ctx。
 func NewRESTServer(ctx context.Context, cfg Config, opts ...Option) *Server {
 	o := newOptions(opts)
 	validateREST(cfg, o)
 
-	s := &Server{}
+	s := newServer(cfg, o)
 	s.attachDirectHTTP(ctx, cfg, o)
+	return s
+}
+
+// newServer 建一个就绪状态为「服务中」的 Server 骨架。
+func newServer(cfg Config, o *options) *Server {
+	s := &Server{readiness: o.readiness, drainDelayValue: cfg.drainDelay()}
+	s.serving.Store(true)
 	return s
 }
 
@@ -307,7 +383,7 @@ func validateMounts(mounts []mount) {
 }
 
 // newGRPCServer 按选项装好拦截链、资源上限与内置服务。
-func newGRPCServer(cfg Config, o *options) *grpc.Server {
+func newGRPCServer(cfg Config, o *options, s *Server) *grpc.Server {
 	// 出口层错误翻译是仓库级约定，作为链首固定挂上；Chain*Interceptor 多次调用是
 	// 追加语义，后面的注入项与自定义拦截器都不会顶掉它。
 	opts := []grpc.ServerOption{
@@ -324,10 +400,15 @@ func newGRPCServer(cfg Config, o *options) *grpc.Server {
 			MaxConnectionAgeGrace: defaultMaxConnectionAgeGrace,
 		}))
 	if o.tracerProvider != nil {
-		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler(
+		statsOpts := []otelgrpc.Option{
 			otelgrpc.WithTracerProvider(o.tracerProvider),
 			// 传播器必须显式给，否则入站 traceparent 读不到（见 tracePropagators）。
-			otelgrpc.WithPropagators(tracePropagators))))
+			otelgrpc.WithPropagators(tracePropagators),
+		}
+		if o.meterProvider != nil {
+			statsOpts = append(statsOpts, otelgrpc.WithMeterProvider(o.meterProvider))
+		}
+		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler(statsOpts...)))
 	}
 	if timeout := cfg.handlerTimeout(); timeout > 0 {
 		// 超时在访问日志之外：日志因此记得到「这次请求是超时失败的」。
@@ -359,8 +440,13 @@ func newGRPCServer(cfg Config, o *options) *grpc.Server {
 	opts = append(opts, o.grpcOptions...)
 
 	srv := grpc.NewServer(opts...)
-	healthpb.RegisterHealthServer(srv, health.NewServer()) // 探针用
-	reflection.Register(srv)                               // 本地调试用
+	// 健康服务的句柄要留住：Stop 靠它置 NOT_SERVING 触发摘流。原先就地丢弃，
+	// 于是实例「永远健康」，连停机中都报 SERVING。
+	s.health = health.NewServer()
+	healthpb.RegisterHealthServer(srv, s.health)
+	if cfg.Reflection {
+		reflection.Register(srv) // 免鉴权且吐出完整契约，默认关，见 Config.Reflection
+	}
 	return srv
 }
 
@@ -404,7 +490,7 @@ func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
 	// 入站 traceparent 在这里提取：没有它，外部调用方带着 trace 上下文打 HTTP
 	// 端口时本服务会另起一条 trace，跨服务链路断开——而双端口形态正是推荐的对外
 	// HTTP 形态。直连形态早就有这一层，环回形态原先漏了。
-	var handler http.Handler = mountMux(gwMux, o.mounts)
+	var handler http.Handler = s.mountMux(gwMux, o.mounts)
 	if o.tracerProvider != nil {
 		handler = otelhttp.NewHandler(handler, "http",
 			otelhttp.WithTracerProvider(o.tracerProvider),
@@ -463,14 +549,21 @@ func (s *Server) attachDirectHTTP(ctx context.Context, cfg Config, o *options) {
 		}
 	}
 
-	var handler http.Handler = mountMux(gwMux, o.mounts)
-	if o.tracerProvider != nil {
-		handler = otelhttp.NewHandler(handler, "http",
-			otelhttp.WithTracerProvider(o.tracerProvider),
+	var handler http.Handler = s.mountMux(gwMux, o.mounts)
+	if o.tracerProvider != nil || o.meterProvider != nil {
+		otelOpts := []otelhttp.Option{
 			otelhttp.WithPropagators(tracePropagators),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
-			}))
+			}),
+		}
+		if o.tracerProvider != nil {
+			otelOpts = append(otelOpts, otelhttp.WithTracerProvider(o.tracerProvider))
+		}
+		if o.meterProvider != nil {
+			otelOpts = append(otelOpts, otelhttp.WithMeterProvider(o.meterProvider))
+		}
+		handler = otelhttp.NewHandler(handler, "http", otelOpts...)
 	}
 	s.http = &http.Server{
 		Handler:           limitBody(handler, cfg.maxRequestBytes()),
@@ -510,12 +603,29 @@ func (s *Server) baseContext() func(net.Listener) context.Context {
 	return func(net.Listener) context.Context { return ctx }
 }
 
-// mountMux 组外层路由树：/healthz 探针（HTTP 形态下探针走这里——没有 gRPC health
-// 服务可打）、各挂载点、根路径归 gateway。精确与子树两个模式都要注册，
-// 否则子路径会落进根路径的 gateway。
-func mountMux(gwMux http.Handler, mounts []mount) *http.ServeMux {
+// mountMux 组外层路由树：两个探针、各挂载点、根路径归 gateway。精确与子树两个
+// 模式都要注册，否则子路径会落进根路径的 gateway。
+//
+// 两个探针对应 K8s 的两种语义，不能合成一个：
+//   - /healthz 是 liveness「进程还活着吗」。它恒定 200，连停机期也是——
+//     liveness 转红会让编排系统强杀进程，而停机中的实例正需要时间排空；
+//     依赖不可用同样不该让它转红，重启进程治不好一个挂掉的数据库。
+//   - /readyz 是 readiness「现在能接流量吗」。它查就绪状态位（Stop 入口置假，
+//     这是摘流的起点）与注入的依赖检查。编排系统据此决定要不要往这里发流量。
+//
+// 两个探针都免鉴权：拦探针会让编排系统误判实例死亡。
+func (s *Server) mountMux(gwMux http.Handler, mounts []mount) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.ready(r.Context()); err != nil {
+			// 原因只进响应体不进日志级别：探针每隔几秒打一次，失败时
+			// 刷日志会把真正的故障信息挤掉。
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	for _, mt := range mounts {
@@ -557,6 +667,18 @@ func (s *Server) Start(context.Context) error {
 // 请求经环回打到本进程 gRPC，先关环回或先停 gRPC 都会打断在途请求。
 // 各 Server 的 Shutdown/GracefulStop 会关掉自己的 listener，新连接随之被拒。
 func (s *Server) Stop(ctx context.Context) error {
+	// 先摘流：把就绪状态置假（/readyz 转红、gRPC health 置 NOT_SERVING），
+	// 等编排系统把本实例从负载均衡摘掉，再关监听。顺序反了就是「收到 TERM
+	// 的瞬间拒连」，详见 defaultDrainDelay 的注释。
+	s.markNotServing()
+	if delay := s.drainDelayValue; delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			// 宽限期本来就不够了，别把它全耗在等待上。
+		}
+	}
+
 	var errs []error
 	if s.http != nil {
 		if err := s.http.Shutdown(ctx); err != nil {
@@ -579,6 +701,33 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// markNotServing 置就绪状态为不可用：HTTP 的 /readyz 与 gRPC health 同时转红。
+// 幂等，重复调用无副作用。
+func (s *Server) markNotServing() {
+	s.serving.Store(false)
+	if s.health != nil {
+		// Shutdown 把全部已注册服务（含空名的整体状态）置为 NOT_SERVING。
+		s.health.Shutdown()
+	}
+}
+
+// ready 跑就绪判定：先看状态位，再跑注入的依赖检查。
+//
+// 依赖检查是 readiness 的要点：装配期不 ping 库（DB 比进程晚就绪是常态）这个
+// 取舍成立的前提，正是「上层健康检查会 ping」——没有这一环的话，连不上库的实例
+// 照样通过就绪探针，编排系统继续往它发流量，每个请求都 500。
+func (s *Server) ready(ctx context.Context) error {
+	if !s.serving.Load() {
+		return errors.New("停机中")
+	}
+	for _, check := range s.readiness {
+		if err := check(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // stopGRPC 宽限期内等在途 RPC 收尾，耗尽则强制断开——不肯返回的 GracefulStop

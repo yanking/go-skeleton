@@ -324,8 +324,10 @@ func newGRPCServer(cfg Config, o *options) *grpc.Server {
 			MaxConnectionAgeGrace: defaultMaxConnectionAgeGrace,
 		}))
 	if o.tracerProvider != nil {
-		opts = append(opts, grpc.StatsHandler(
-			otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(o.tracerProvider))))
+		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler(
+			otelgrpc.WithTracerProvider(o.tracerProvider),
+			// 传播器必须显式给，否则入站 traceparent 读不到（见 tracePropagators）。
+			otelgrpc.WithPropagators(tracePropagators))))
 	}
 	if timeout := cfg.handlerTimeout(); timeout > 0 {
 		// 超时在访问日志之外：日志因此记得到「这次请求是超时失败的」。
@@ -373,7 +375,16 @@ func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
 
 	// 环回拨回本进程的 gRPC 端口，HTTP 流量因此同样穿过全部拦截器。
 	// grpc.NewClient 惰性建连，装配期不触网。
-	conn, err := grpc.NewClient(loopbackAddr(s.grpcLn), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if o.tracerProvider != nil {
+		// 环回这一跳也要带上 traceparent，否则 HTTP 入口提取到的 trace 上下文
+		// 走不进 gRPC 服务端：服务端的 StatsHandler 从 metadata 里什么都读不到，
+		// 于是另起一条 trace，外部调用链在本服务的 HTTP 边界断掉。
+		dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+			otelgrpc.WithTracerProvider(o.tracerProvider),
+			otelgrpc.WithPropagators(tracePropagators))))
+	}
+	conn, err := grpc.NewClient(loopbackAddr(s.grpcLn), dialOpts...)
 	if err != nil {
 		panic(fmt.Errorf("装配 transport: 拨号 gateway 环回: %w", err))
 	}
@@ -381,6 +392,7 @@ func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
 
 	gwMux := runtime.NewServeMux(
 		runtime.WithErrorHandler(gatewayErrorHandler),
+		runtime.WithRoutingErrorHandler(routingErrorHandler),
 		runtime.WithIncomingHeaderMatcher(incomingHeaderMatcher),
 	)
 	for _, register := range o.gateways {
@@ -389,8 +401,21 @@ func (s *Server) attachHTTP(ctx context.Context, cfg Config, o *options) {
 		}
 	}
 
+	// 入站 traceparent 在这里提取：没有它，外部调用方带着 trace 上下文打 HTTP
+	// 端口时本服务会另起一条 trace，跨服务链路断开——而双端口形态正是推荐的对外
+	// HTTP 形态。直连形态早就有这一层，环回形态原先漏了。
+	var handler http.Handler = mountMux(gwMux, o.mounts)
+	if o.tracerProvider != nil {
+		handler = otelhttp.NewHandler(handler, "http",
+			otelhttp.WithTracerProvider(o.tracerProvider),
+			otelhttp.WithPropagators(tracePropagators),
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}))
+	}
+
 	s.http = &http.Server{
-		Handler:           limitBody(mountMux(gwMux, o.mounts), cfg.maxRequestBytes()),
+		Handler:           limitBody(handler, cfg.maxRequestBytes()),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
 		IdleTimeout:       defaultIdleTimeout,
 		BaseContext:       s.baseContext(),
@@ -428,6 +453,7 @@ func (s *Server) attachDirectHTTP(ctx context.Context, cfg Config, o *options) {
 	middlewares = append(middlewares, o.middlewares...)
 	gwMux := runtime.NewServeMux(
 		runtime.WithErrorHandler(gatewayErrorHandler),
+		runtime.WithRoutingErrorHandler(routingErrorHandler),
 		runtime.WithIncomingHeaderMatcher(incomingHeaderMatcher),
 		runtime.WithMiddlewares(middlewares...),
 	)
@@ -441,7 +467,7 @@ func (s *Server) attachDirectHTTP(ctx context.Context, cfg Config, o *options) {
 	if o.tracerProvider != nil {
 		handler = otelhttp.NewHandler(handler, "http",
 			otelhttp.WithTracerProvider(o.tracerProvider),
-			otelhttp.WithPropagators(directPropagators),
+			otelhttp.WithPropagators(tracePropagators),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}))

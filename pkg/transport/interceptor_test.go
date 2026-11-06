@@ -91,7 +91,7 @@ func TestAccessLogFields(t *testing.T) {
 			if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 				t.Fatalf("日志不是合法 JSON: %v", err)
 			}
-			for _, key := range []string{"rpc", "peer", "code", "duration"} {
+			for _, key := range []string{"proto", "call", "peer", "code", "duration"} {
 				if _, ok := got[key]; !ok {
 					t.Errorf("访问日志缺 %q 字段: %s", key, buf.String())
 				}

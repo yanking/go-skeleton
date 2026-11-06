@@ -23,7 +23,9 @@ import (
 )
 
 // directAccessLog 直连形态的访问日志 middleware，字段与 gRPC 侧 logAccess 同构
-// （code 用同一套 gRPC 码字表，成功失败都记）；rpc 字段记 HTTP 方法与路径。
+// （同一套键名、同一套 gRPC 码字表，成功失败都记）：proto 区分形态，call 在这里
+// 记「HTTP 方法 + 路径」、在 gRPC 侧记全方法名——键名一致，一套检索与告警规则
+// 才能同时覆盖两种形态。
 // code 取出口翻译后实际发出的码——renderError 经响应写回原（accessWriter）通知
 // 本 middleware，成功路径无人记录即 OK。
 func directAccessLog(logger *slog.Logger) runtime.Middleware {
@@ -33,16 +35,17 @@ func directAccessLog(logger *slog.Logger) runtime.Middleware {
 			state := &accessState{}
 			next(&accessWriter{ResponseWriter: w, state: state}, r, pathParams)
 			attrs := []any{
-				"http", r.Method + " " + r.URL.Path,
+				"proto", "http",
+				"call", r.Method + " " + r.URL.Path,
 				"peer", r.RemoteAddr,
 				"code", state.logCode().String(),
 				"duration", time.Since(begin).String(),
 			}
 			if state.err != nil {
-				logger.WarnContext(r.Context(), "http 访问", append(attrs, "err", state.err)...)
+				logger.WarnContext(r.Context(), "访问", append(attrs, "err", state.err)...)
 				return
 			}
-			logger.InfoContext(r.Context(), "http 访问", attrs...)
+			logger.InfoContext(r.Context(), "访问", attrs...)
 		}
 	}
 }
@@ -115,10 +118,16 @@ func (w *accessWriter) recordAccess(code codes.Code, err error) {
 // Unwrap 让 http.NewResponseController 能穿透到被包的原 Writer。
 func (w *accessWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// directPropagators 直连形态 otelhttp 用的传播器：提取入站 W3C traceparent，
-// 上游经 HTTP 打来的调用得以续链（环回形态的 HTTP 端口没有这一层提取）。
-// 仓库不设 otel 全局，传播器同 httpc 一样显式给出、只认 TraceContext。
-var directPropagators = propagation.TraceContext{}
+// tracePropagators 本包统一的 trace 传播器，只认 W3C TraceContext，三处
+// instrumentation（otelhttp 的两种 HTTP 出口、otelgrpc 的服务端与环回客户端）
+// 共用它。
+//
+// 必须显式给：otelgrpc 与 otelhttp 的默认值都是 otel.GetTextMapPropagator()，
+// 而本仓刻意不设 otel 全局（理由见 pkg/telemetry 包注释），那个全局默认是一个
+// **空的 composite**——既不提取也不注入。不显式传的话，入站 traceparent 读不到、
+// 出站也不带，跨服务链路在每个边界都断成孤立的单服务 trace，而两侧都不报错、
+// 日志里也看不出来：span 照样有、trace_id 照样生成，只是每跳都是新的。
+var tracePropagators = propagation.TraceContext{}
 
 // directTimeout 直连形态的处理超时 middleware，语义同 gRPC 侧的 unaryTimeout。
 func directTimeout(timeout time.Duration) runtime.Middleware {

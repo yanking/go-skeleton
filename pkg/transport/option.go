@@ -131,9 +131,18 @@ func WithStreamInterceptor(interceptors ...grpc.StreamServerInterceptor) Option 
 	return func(o *options) { o.stream = append(o.stream, interceptors...) }
 }
 
-// WithGRPCServerOption 透传原生 grpc.ServerOption（消息体上限、keepalive 参数、
-// TLS 凭证等），本包不为每个 gRPC 旋钮再包一层选项。只有 NewRPCServer 与
-// NewRPCRESTServer 接受它——NewRESTServer 没有 gRPC 服务器。
+// WithGRPCServerOption 透传原生 grpc.ServerOption（TLS 凭证、改写本包设的消息体
+// 上限与 keepalive 参数等），本包不为每个 gRPC 旋钮再包一层选项。只有 NewRPCServer
+// 与 NewRPCRESTServer 接受它——NewRESTServer 没有 gRPC 服务器。
+//
+// 不要传 grpc.UnaryInterceptor / grpc.StreamInterceptor（非 Chain 形态）：grpc-go
+// 会把它们预置到全部 Chain 拦截器之前，于是它跑在本包的出口翻译之外，裸错误原文
+// 直通客户端——「出口翻译固定为链首」这条不变量就此被绕开。自定义拦截器一律用
+// WithUnaryInterceptor / WithStreamInterceptor，它们挂在链内的正确位置。
+//
+// 本包挡不住这件事：grpc.ServerOption 是不透明的函数类型，装配期分辨不出传进来的
+// 是哪一个选项。别处的错配都是装配期 panic，这里只能靠约定——纪律上的这处不一致
+// 是已知的，写在这里而不是假装不存在。
 func WithGRPCServerOption(opts ...grpc.ServerOption) Option {
 	return func(o *options) { o.grpcOptions = append(o.grpcOptions, opts...) }
 }

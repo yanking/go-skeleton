@@ -183,16 +183,17 @@ func streamAccessLog(logger *slog.Logger) grpc.StreamServerInterceptor {
 // 否则 errcode 与裸错误在日志里一律是 Unknown，分不开客户端取消与服务端故障；err 仍记原始错误。
 func logAccess(ctx context.Context, logger *slog.Logger, method string, elapsed time.Duration, err error) {
 	attrs := []any{
-		"rpc", method,
+		"proto", "grpc",
+		"call", method,
 		"peer", peerAddr(ctx),
 		"code", status.Code(toStatusErr(err)).String(),
 		"duration", elapsed.String(),
 	}
 	if err != nil {
-		logger.WarnContext(ctx, "rpc 访问", append(attrs, "err", err)...)
+		logger.WarnContext(ctx, "访问", append(attrs, "err", err)...)
 		return
 	}
-	logger.InfoContext(ctx, "rpc 访问", attrs...)
+	logger.InfoContext(ctx, "访问", attrs...)
 }
 
 // peerAddr 取对端地址；取不到时给 "unknown" 而非某个合法 IP——

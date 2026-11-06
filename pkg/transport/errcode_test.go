@@ -137,41 +137,65 @@ func TestToStatusErr(t *testing.T) {
 		}
 	})
 
-	t.Run("客户端类 status 原样放行，外层包装文本不出客户端", func(t *testing.T) {
-		inner := status.Error(codes.PermissionDenied, "无权访问")
-		st, ok := status.FromError(toStatusErr(fmt.Errorf("校验 10.0.0.5: %w", inner)))
-		if !ok {
-			t.Fatal("翻译结果不是 status 错误")
+	// 白名单：非本包造出的 status 一律只留码。原先这里按「故障类码」黑名单换消息，
+	// 其余码的消息原样放行——于是 PermissionDenied、FailedPrecondition、
+	// ResourceExhausted 这些码的消息直通客户端，实测能带出内网地址与库凭证。
+	t.Run("别处来的 status 只保留码，消息与 details 一律丢弃", func(t *testing.T) {
+		cases := []struct {
+			name string
+			code codes.Code
+		}{
+			// 下游不可达时 gRPC 客户端库生成的码，消息带拨号详情。
+			{"下游不可达", codes.Unavailable},
+			// 下游漏翻译时 gRPC 默认给的码，消息就是原始错误文本。
+			{"下游漏翻译", codes.Unknown},
+			// 这几个原先走「原样放行」，是消息泄漏的真实入口。
+			{"权限类", codes.PermissionDenied},
+			{"前置条件类", codes.FailedPrecondition},
+			{"超限类", codes.ResourceExhausted},
 		}
-		if st.Code() != codes.PermissionDenied || st.Message() != "无权访问" {
-			t.Errorf("status = %v %q，期望 PermissionDenied 无权访问", st.Code(), st.Message())
+		const leak = `dial tcp 10.0.0.5:5432: connect: connection refused (user=svc password=hunter2)`
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				raw := status.New(c.code, leak)
+				// 下游自己分段的业务码：透出去就是冒充本仓的码。
+				withInfo, err := raw.WithDetails(&errdetails.ErrorInfo{Reason: "20007", Domain: "other-repo"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				st := status.Convert(toStatusErr(fmt.Errorf("查询用户: %w", withInfo.Err())))
+
+				if st.Code() != c.code {
+					t.Errorf("status code = %v，期望保留 %v（码携带重试语义）", st.Code(), c.code)
+				}
+				if st.Message() != errcode.ErrInternal.Message {
+					t.Errorf("message = %q，期望换成通用内部错误消息", st.Message())
+				}
+				if strings.Contains(st.Message(), "10.0.0.5") || strings.Contains(st.Message(), "hunter2") {
+					t.Error("原始错误文本泄漏进了给客户端的消息（违反宪法第 2 条）")
+				}
+				if got := len(st.Details()); got != 0 {
+					t.Errorf("details 条数 = %d，期望全部丢弃——别人的业务码不能冒充本仓的", got)
+				}
+			})
 		}
 	})
 
-	t.Run("故障类 status 只换消息，码与 details 保留", func(t *testing.T) {
-		// Unavailable 是下游不可达时 gRPC 客户端库生成的码，消息带拨号详情；Unknown 是下游漏翻译时
-		// gRPC 默认给的码，消息就是原始错误文本——四个故障类码的消息都不能带出去。
-		for _, code := range []codes.Code{codes.Unknown, codes.Internal, codes.Unavailable, codes.DataLoss} {
-			raw := status.New(code, `connection error: desc = "transport: Error while dialing: dial tcp 10.0.0.5:50051: connect: connection refused"`)
-			withInfo, err := raw.WithDetails(&errdetails.ErrorInfo{Reason: "7", Domain: "downstream"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			st := status.Convert(toStatusErr(fmt.Errorf("查询用户: %w", withInfo.Err())))
-			if st.Code() != code {
-				t.Errorf("%v: status code = %v，期望保留", code, st.Code())
-			}
-			if st.Message() != errcode.ErrInternal.Message || strings.Contains(st.Message(), "10.0.0.5") {
-				t.Errorf("%v: message = %q，期望换成通用内部错误消息", code, st.Message())
-			}
-			details := st.Details()
-			if len(details) != 1 {
-				t.Errorf("%v: details 条数 = %d，期望保留 1 条", code, len(details))
-				continue
-			}
-			if info, ok := details[0].(*errdetails.ErrorInfo); !ok || info.GetReason() != "7" {
-				t.Errorf("%v: details[0] = %v，期望保留下游原 ErrorInfo（Reason \"7\"）", code, details[0])
-			}
+	// 自家 status（带本仓归属域）是「有意给客户端看的」，原样放行。
+	t.Run("本包造出的 status 原样放行", func(t *testing.T) {
+		st := status.Convert(toStatusErr(fmt.Errorf("包装: %w", errcode.ErrNotFound)))
+		if st.Code() != errcode.ErrNotFound.Status {
+			t.Errorf("status code = %v，期望 %v", st.Code(), errcode.ErrNotFound.Status)
+		}
+		if st.Message() != errcode.ErrNotFound.Message {
+			t.Errorf("message = %q，期望业务消息 %q", st.Message(), errcode.ErrNotFound.Message)
+		}
+		if got := len(st.Details()); got != 1 {
+			t.Fatalf("details 条数 = %d，期望保留本仓的 ErrorInfo", got)
+		}
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		if !ok || info.GetReason() != strconv.Itoa(errcode.ErrNotFound.Code) {
+			t.Errorf("details[0] = %v，期望本仓业务码 %d", st.Details()[0], errcode.ErrNotFound.Code)
 		}
 	})
 

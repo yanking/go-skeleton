@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-skeleton API 文档</title>
+<script src="https://cdn.redocly.com/redoc/v2.5.3/bundles/redoc.standalone.js"></script>
+<style>
+  body { margin: 0; }
+  header { padding: 10px 16px; display: flex; gap: 12px; align-items: center;
+           font-family: system-ui, sans-serif; border-bottom: 1px solid #eee; }
+  select { padding: 4px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>go-skeleton API 文档</strong>
+  <select id="svc"></select>
+</header>
+<div id="api"></div>
+<script>
+  const api = document.getElementById('api');
+  fetch('/docs/manifest.json')
+    .then(r => r.json())
+    .then(list => {
+      const sel = document.getElementById('svc');
+      list.forEach(name => sel.add(new Option(name.split('/')[0], name)));
+      sel.onchange = () => Redoc.init('/docs/' + sel.value, { pathInMiddlePanel: true }, api);
+      if (list.length) sel.onchange();
+    });
+</script>
+</body>
+</html>

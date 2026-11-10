@@ -1,0 +1,13 @@
+# buf workspace:api 是契约源,google/api 的 HTTP 注解经 BSR 依赖引入,
+# 版本钉在 buf.lock(改 deps 后跑 buf dep update)。生成命令见 Makefile 的 proto 目标。
+version: v2
+modules:
+  - path: api
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
